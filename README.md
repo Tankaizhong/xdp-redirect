@@ -238,6 +238,37 @@ PING 10.0.1.2 (10.0.1.2) 56(84) bytes of data.
 64 bytes from 10.0.1.2: icmp_seq=2 ttl=64 time=0.xxx ms
 ```
 
+### 第四步：卸载 XDP 验证（负向验证）
+
+ping 通后，卸载宿主机侧的 XDP 程序，ping 应立即断开——这证明连通性**完全由 XDP redirect 提供**，而非内核路由。
+
+```bash
+# 卸载宿主机侧 XDP（namespace 侧的 xdp_pass 不影响此实验结论）
+sudo ip link set dev v1-host xdp off
+sudo ip link set dev v2-host xdp off
+```
+
+再次 ping：
+
+```bash
+sudo ip netns exec ns1 ping 10.0.1.2
+```
+
+预期输出：
+
+```
+# ping 立即卡住或输出：
+From 10.0.1.1 icmp_seq=1 Destination Host Unreachable
+```
+
+原因：宿主机侧 veth 没有 IP 地址，内核路由表中也没有 10.0.1.0/24 的路由，两个 namespace 之间唯一的转发路径就是 XDP redirect。卸载后无任何路径可达，ping 必然失败。
+
+恢复：
+
+```bash
+sudo bash setup_netns.sh
+```
+
 ---
 
 ## 验证与调试
@@ -305,7 +336,7 @@ sudo rm -rf /sys/fs/bpf/xdp/
 ```
 .
 ├── Makefile                  # 编译脚本
-├── xdp_prog_kern.c           # XDP 内核程序（含 5 个 section）
+├── xdp_prog_kern.c           # XDP 内核程序（xdp_redirect_map + xdp_pass）
 ├── xdp_prog_user.c           # 用户态工具，通过 bpftool 更新 pinned map
 ├── setup_netns.sh            # 一键建拓扑、加载程序、配置规则
 ├── env.sh                    # 依赖安装命令
