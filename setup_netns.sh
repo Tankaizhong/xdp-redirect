@@ -105,6 +105,21 @@ sysctl -w net.ipv4.conf.v1-host.rp_filter=0
 sysctl -w net.ipv4.conf.v2-host.rp_filter=0
 sysctl -w net.ipv4.conf.all.rp_filter=0
 
+# 8b. 预填 ARP 缓存（静态 PERMANENT 条目）
+# XDP 只改写目标 MAC，不改源 MAC。NS2 看到的源 MAC 是 v1-ns1 的 MAC，
+# NS1 看到的源 MAC 是 v2-ns2 的 MAC。写入静态 ARP 条目避免 STALE→PROBE 导致
+# TCP SYN-ACK 被延迟或丢弃。
+ip netns exec ns1 ip neigh replace 10.0.1.2 lladdr $V2_NS2_MAC dev v1-ns1 nud permanent
+ip netns exec ns2 ip neigh replace 10.0.1.1 lladdr $V1_NS1_MAC dev v2-ns2 nud permanent
+
+# 8c. 关闭 namespace 侧 veth 的 TX checksum offload
+# veth 的 tx-checksum-ip-generic 默认开启：TCP 包以 CHECKSUM_PARTIAL 发出，
+# 期望驱动填充校验和，但 XDP 在校验和填充前就把包 redirect 走了，
+# 导致对端收到校验和错误的 TCP 包（InErrs 全部命中）。ICMP 因为用
+# CHECKSUM_COMPLETE（内核算好的）不受影响，所以 ping 通而 TCP 不通。
+ip netns exec ns1 ethtool -K v1-ns1 tx-checksum-ip-generic off
+ip netns exec ns2 ethtool -K v2-ns2 tx-checksum-ip-generic off
+
 echo ""
 echo "=== 网络命名空间配置完成 ==="
 echo "NS1 (10.0.1.1, MAC: $V1_NS1_MAC)"

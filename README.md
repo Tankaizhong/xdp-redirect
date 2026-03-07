@@ -6,6 +6,7 @@
 - [原理说明](#原理说明)
 - [eBPF Map 结构详解](#ebpf-map-结构详解)
 - [关键设计决策](#关键设计决策)
+- [已知问题与解决方案](#已知问题与解决方案)
 - [环境要求](#环境要求)
 - [从零复现](#从零复现)
 - [验证与调试](#验证与调试)
@@ -129,6 +130,66 @@ bpftool net attach xdp id $V1_PROG dev v2-host
 
 ---
 
+## 关键设计决策
+
+| 问题 | 选择 | 原因 |
+|------|------|------|
+| `bpf_redirect` vs `bpf_redirect_map` | `bpf_redirect_map` | veth 的 `veth_xdp_xmit` 只对 DEVMAP 路径生效 |
+| 两套 Map vs 共享 Map | 共享（同一程序实例） | 配置一次双向生效，避免状态不一致 |
+| 仅 v1-host 挂 XDP vs 双侧 | **双侧都挂** | XDP 仅处理入方向，双向通信各需一个入口 |
+| namespace 侧是否挂 XDP | **必须挂** `xdp_pass` | `veth_xdp_xmit` 要求 peer 有 native XDP 程序 |
+| native XDP vs skb（generic）模式 | native | veth 支持 native 模式；generic 模式在 TX 路径上绕不开 skb，无法触发 `ndo_xdp_xmit` |
+| namespace 侧 TX checksum offload | **必须关闭** | veth 默认开启 `tx-checksum-ip-generic`，导致 TCP 包以 `CHECKSUM_PARTIAL` 发出（见下节）|
+
+---
+
+## 已知问题与解决方案
+
+### veth TX Checksum Offload 导致 TCP 不通（ping 正常）
+
+**现象**：ping 双向通，但 TCP 连接永远超时，`nc`/`curl`/`python` 均无法建连。
+
+**根本原因**：
+
+veth 接口默认开启 `tx-checksum-ip-generic`。发送 TCP 包时，内核将校验和标记为 `CHECKSUM_PARTIAL`——意思是"由驱动在 TX 时填充"。但 XDP 运行在 veth 驱动的 **RX 入口**（对端 TX 完成后立即触发），此时校验和尚未被计算，XDP 就把这个包 redirect 走了。对端（NS2）收到的 TCP 包校验和无效，内核协议栈静默丢弃，不回 RST。
+
+ICMP ping 不受影响，因为 ping 使用 raw socket，内核在发出前已用 `CHECKSUM_COMPLETE` 算好完整校验和。
+
+```
+NS1 TCP 发送路径（有问题时）：
+
+  TCP stack 生成 SYN
+     │  checksum = CHECKSUM_PARTIAL（驱动填充）
+     ▼
+  v1-ns1 TX → v1-host RX
+     │
+     ▼ XDP 在此拦截并 redirect
+     │  ← 校验和尚未填充！
+     ▼
+  v2-ns2 收到包：checksum invalid → InErrs++ → 静默丢弃
+     │
+     └─ NS1 等不到 SYN-ACK，connect() timeout
+```
+
+**诊断方法**：
+
+```bash
+# 在 NS2 中查看 TCP 统计，若 InErrs == InSegs，说明全部是校验和错误
+ip netns exec ns2 cat /proc/net/snmp | grep Tcp
+# 正常：InErrs 应为 0
+# 有问题：InErrs = InSegs（每个收到的 TCP 段都报错）
+```
+
+**修复**：关闭 namespace 侧 veth 的 TX checksum offload，强制内核在发出前计算完整校验和：
+
+```bash
+ethtool -K v1-ns1 tx-checksum-ip-generic off
+ethtool -K v2-ns2 tx-checksum-ip-generic off
+```
+
+`setup_netns.sh` 已包含此修复，无需手动操作。
+
+---
 
 ## 环境要求
 
@@ -174,14 +235,16 @@ sudo bash setup_netns.sh
 3. 配置 IP 地址和默认路由
 4. 关闭宿主机侧的 rp_filter（否则内核因源 IP 不符合路由表而丢包）
 5. 在 `v1-ns1`、`v2-ns2` 上加载 `xdp_pass`（满足 `veth_xdp_xmit` 要求）
-6. 在 `v1-host` 加载 `xdp_redirect_map`，再将同一程序 attach 到 `v2-host`
-7. Pin Map 到 `/sys/fs/bpf/xdp/globals/`
-8. 调用 `xdp_prog_user` 填充双向转发规则
+6. 关闭 `v1-ns1`、`v2-ns2` 的 TX checksum offload（修复 TCP 校验和问题）
+7. 在 `v1-host` 加载 `xdp_redirect_map`，再将同一程序 attach 到 `v2-host`
+8. Pin Map 到 `/sys/fs/bpf/xdp/globals/`
+9. 调用 `xdp_prog_user` 填充双向转发规则
 
 ### 第三步：测试连通性
 
+#### ICMP（ping）
+
 ```bash
-# 从 NS1 ping NS2
 sudo ip netns exec ns1 ping 10.0.1.2
 ```
 
@@ -191,6 +254,58 @@ sudo ip netns exec ns1 ping 10.0.1.2
 PING 10.0.1.2 (10.0.1.2) 56(84) bytes of data.
 64 bytes from 10.0.1.2: icmp_seq=1 ttl=64 time=0.xxx ms
 64 bytes from 10.0.1.2: icmp_seq=2 ttl=64 time=0.xxx ms
+```
+
+#### TCP
+
+```bash
+# 终端 A：NS2 监听
+sudo ip netns exec ns2 nc -l -p 8080
+
+# 终端 B：NS1 连接并发送数据
+sudo ip netns exec ns1 bash -c 'echo "hello tcp" | nc -w2 10.0.1.2 8080'
+```
+
+验证端口可达（无需提前启动 server，收到 RST 即说明包到达了 NS2）：
+
+```bash
+sudo ip netns exec ns1 nc -zv 10.0.1.2 8080
+# 期望：Connection to 10.0.1.2 8080 port [tcp/*] succeeded!
+```
+
+测试大流量吞吐（验证无丢包）：
+
+```bash
+# NS2 接收并统计字节数
+sudo ip netns exec ns2 bash -c 'nc -l -p 8080 | wc -c' &
+
+# NS1 发送 100MB
+sudo ip netns exec ns1 bash -c 'dd if=/dev/zero bs=1M count=100 | nc -w5 10.0.1.2 8080'
+# 期望：NS2 侧输出 104857600（100 × 1024 × 1024 字节）
+```
+
+用 iperf3 测带宽（需安装 `apt install iperf3`）：
+
+```bash
+sudo ip netns exec ns2 iperf3 -s -p 5201 &
+sudo ip netns exec ns1 iperf3 -c 10.0.1.2 -p 5201 -t 5
+```
+
+#### UDP
+
+```bash
+# 终端 A：NS2 监听 UDP
+sudo ip netns exec ns2 nc -u -l -p 9090
+
+# 终端 B：NS1 发送 UDP 数据报
+sudo ip netns exec ns1 bash -c 'echo "hello udp" | nc -u -w1 10.0.1.2 9090'
+```
+
+测试 UDP 吞吐：
+
+```bash
+sudo ip netns exec ns2 iperf3 -s -p 5202 &
+sudo ip netns exec ns1 iperf3 -c 10.0.1.2 -p 5202 -u -b 1G -t 5
 ```
 
 ### 第四步：卸载 XDP 验证（负向验证）
