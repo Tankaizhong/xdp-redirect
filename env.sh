@@ -1,4 +1,4 @@
-sudo apt install clang llvm libelf-dev libpcap-dev build-essential libc6-dev-i386 m4
+sudo apt install clang llvm libelf-dev libpcap-dev libbpf-dev build-essential libc6-dev-i386 m4
 
 sudo apt install linux-headers-$(uname -r)
 
