@@ -1,8 +1,5 @@
 # XDP Makefile
 CLANG ?= clang
-LLVM_STRIP ?= llvm-strip
-LLVMLLC ?= llc
-PERL := perl
 
 # Detect host architecture and map to BPF target arch name:
 #   x86_64  → x86   (uname returns "x86_64", BPF macro expects "x86")

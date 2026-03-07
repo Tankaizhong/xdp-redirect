@@ -319,8 +319,5 @@ sudo rm -rf /sys/fs/bpf/xdp/
 
 | Section | 函数 | 用途 |
 |---------|------|------|
-| `xdp_icmp_echo` | `xdp_icmp_echo_func` | 在 XDP 层直接回应 ping，不进内核 |
-| `xdp_redirect` | `xdp_redirect_func` | 硬编码目标的简单重定向（示例） |
 | `xdp_redirect_map` | `xdp_redirect_map_func` | **本实验使用**：查 Map 动态重定向 |
-| `xdp_router` | `xdp_router_func` | 调用 `bpf_fib_lookup` 的三层路由 |
 | `xdp_pass` | `xdp_pass_func` | 直接返回 `XDP_PASS`，挂在 NS 侧满足 veth 要求 |
