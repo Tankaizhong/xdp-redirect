@@ -3,4 +3,4 @@ sudo apt install clang llvm libelf-dev libpcap-dev libbpf-dev build-essential li
 sudo apt install linux-headers-$(uname -r)
 
 sudo apt install linux-tools-common linux-tools-generic
-sudo apt install tcpdump
+sudo apt install tcpdump xdp-tools
