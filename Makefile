@@ -10,8 +10,16 @@ PERL := perl
 #   armv*   → arm
 ARCH ?= $(shell uname -m | sed 's/x86_64/x86/' | sed 's/aarch64/arm64/' | sed 's/armv.*/arm/')
 
-# Kernel headers
+# Detect multiarch tuple for architecture-specific system headers.
+# e.g. x86_64-linux-gnu on amd64, aarch64-linux-gnu on arm64.
+# asm/types.h (pulled in by linux/bpf.h) lives under this path.
+MULTIARCH ?= $(shell dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null)
+
+# Kernel headers: generic path + arch-specific multiarch path
 KERNEL_INCLUDE := -I/usr/include
+ifneq ($(MULTIARCH),)
+KERNEL_INCLUDE += -I/usr/include/$(MULTIARCH)
+endif
 
 # BPF flags
 CFLAGS := -g -O2 -Wall
@@ -26,7 +34,7 @@ all: $(OBJ) $(USER_PROG)
 
 # Compile XDP kernel program
 $(OBJ): xdp_prog_kern.c common/parsing_helpers.h common/rewrite_helpers.h
-	$(CLANG) $(BPF_CFLAGS) $(CFLAGS) -target bpf -c $< -o $@
+	$(CLANG) $(BPF_CFLAGS) $(CFLAGS) $(KERNEL_INCLUDE) -target bpf -c $< -o $@
 
 # Compile user space program
 $(USER_PROG): xdp_prog_user.c

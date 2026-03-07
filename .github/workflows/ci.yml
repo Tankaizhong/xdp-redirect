@@ -15,19 +15,25 @@ jobs:
       matrix:
         include:
           # ── x86_64 ──────────────────────────────────────────────────────
+          # libc6-dev-i386 is required on x86_64: linux/if.h pulls in
+          # sys/socket.h → features.h → gnu/stubs.h → gnu/stubs-32.h
           - os: ubuntu-22.04
             runner: ubuntu-22.04
             arch: x86_64
+            extra_packages: libc6-dev-i386
           - os: ubuntu-24.04
             runner: ubuntu-24.04
             arch: x86_64
+            extra_packages: libc6-dev-i386
           # ── arm64 ───────────────────────────────────────────────────────
           - os: ubuntu-22.04
             runner: ubuntu-22.04-arm
             arch: arm64
+            extra_packages: ""
           - os: ubuntu-24.04
             runner: ubuntu-24.04-arm
             arch: arm64
+            extra_packages: ""
 
     steps:
       - uses: actions/checkout@v4
@@ -39,7 +45,8 @@ jobs:
             clang llvm \
             libelf-dev libpcap-dev libbpf-dev \
             build-essential \
-            linux-headers-$(uname -r)
+            linux-headers-$(uname -r) \
+            ${{ matrix.extra_packages }}
 
       - name: Build
         run: make
