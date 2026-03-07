@@ -94,15 +94,10 @@ ip link set v2-host up
 
 
 # 7. 获取关键信息
-V1_HOST=v1-host
-V2_HOST=v2-host
 V1_HOST_IDX=$(cat /sys/class/net/v1-host/ifindex)
 V2_HOST_IDX=$(cat /sys/class/net/v2-host/ifindex)
 V1_NS1_MAC=$(ip netns exec ns1 cat /sys/class/net/v1-ns1/address)
 V2_NS2_MAC=$(ip netns exec ns2 cat /sys/class/net/v2-ns2/address)
-# 宿主机端接口的 MAC 地址（XDP 程序需要用这些）
-V1_HOST_MAC=$(cat /sys/class/net/v1-host/address)
-V2_HOST_MAC=$(cat /sys/class/net/v2-host/address)
 
 # 8. 必须：关闭宿主机的反向路径过滤 (RP Filter)
 # 否则内核会因为收到的包源IP不符合路由表而丢弃包

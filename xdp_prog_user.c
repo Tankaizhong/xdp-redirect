@@ -18,7 +18,6 @@
 struct config {
     char ifname_in[MAX_IFACE_LEN];
     char ifname_out[MAX_IFACE_LEN];
-    unsigned char src_mac[ETH_ALEN];
     unsigned char dst_mac[ETH_ALEN];
     int has_mac;
 };
@@ -76,25 +75,17 @@ int main(int argc, char **argv)
     int ret = EXIT_SUCCESS;
 
     static struct option long_options[] = {
-        {"src-mac", required_argument, 0, 's'},
         {"dest-mac", required_argument, 0, 't'},
         {0, 0, 0, 0}
     };
 
-    while ((opt = getopt_long(argc, argv, "d:r:s:t:", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "d:r:t:", long_options, NULL)) != -1) {
         switch (opt) {
         case 'd':
             strncpy(cfg.ifname_in, optarg, MAX_IFACE_LEN - 1);
             break;
         case 'r':
             strncpy(cfg.ifname_out, optarg, MAX_IFACE_LEN - 1);
-            break;
-        case 's':
-            if (parse_mac(optarg, cfg.src_mac) < 0) {
-                fprintf(stderr, "Error: invalid source MAC format\n");
-                return EXIT_FAILURE;
-            }
-            cfg.has_mac = 1;
             break;
         case 't':
             if (parse_mac(optarg, cfg.dst_mac) < 0) {
