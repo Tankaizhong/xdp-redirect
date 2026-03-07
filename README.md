@@ -186,7 +186,7 @@ bpftool net attach xdp id $V1_PROG dev v2-host
 安装依赖（Ubuntu / Debian）：
 
 ```bash
-sudo apt install clang llvm libelf-dev libpcap-dev build-essential libc6-dev-i386 m4
+sudo apt install clang llvm libelf-dev libpcap-dev build-essential libc6-dev-i386 m4 libbpf-dev
 sudo apt install linux-headers-$(uname -r)
 sudo apt install linux-tools-common linux-tools-generic
 sudo apt install tcpdump
