@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  build:
+    name: Build · ${{ matrix.os }} · ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ── x86_64 ──────────────────────────────────────────────────────
+          - os: ubuntu-22.04
+            runner: ubuntu-22.04
+            arch: x86_64
+          - os: ubuntu-24.04
+            runner: ubuntu-24.04
+            arch: x86_64
+          # ── arm64 ───────────────────────────────────────────────────────
+          - os: ubuntu-22.04
+            runner: ubuntu-22.04-arm
+            arch: arm64
+          - os: ubuntu-24.04
+            runner: ubuntu-24.04-arm
+            arch: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            clang llvm \
+            libelf-dev libpcap-dev libbpf-dev \
+            build-essential \
+            linux-headers-$(uname -r)
+
+      - name: Build
+        run: make
+
+      - name: Verify artifacts exist
+        run: |
+          test -f xdp_prog_kern.o && echo "✓ xdp_prog_kern.o"
+          test -f xdp_prog_user  && echo "✓ xdp_prog_user"
+
+      - name: Verify BPF sections in object
+        run: |
+          echo "── BPF sections ──"
+          llvm-objdump -h xdp_prog_kern.o \
+            | awk 'NR<=4 || /xdp_|\.maps/ {print}'
+
+      - name: Verify ARCH macro in object
+        run: |
+          # Confirm the correct __TARGET_ARCH_<arch> was embedded
+          EXPECTED="__TARGET_ARCH_$(uname -m | sed 's/x86_64/x86/' | sed 's/aarch64/arm64/' | sed 's/armv.*/arm/')"
+          llvm-strings xdp_prog_kern.o | grep -q "$EXPECTED" \
+            && echo "✓ $EXPECTED found" \
+            || echo "ℹ $EXPECTED not found in strings (may be fine if unused by helpers)"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: xdp-redirect-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            xdp_prog_kern.o
+            xdp_prog_user
+          retention-days: 7

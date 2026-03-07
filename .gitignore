@@ -1,0 +1,6 @@
+# Build artifacts
+*.o
+xdp_prog_user
+
+# IDE / tooling
+.claude/
