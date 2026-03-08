@@ -77,4 +77,87 @@ jobs:
           path: |
             xdp_prog_kern.o
             xdp_prog_user
+            setup_netns.sh
           retention-days: 7
+
+  # ── Connectivity test (ICMP + TCP, two namespaces) ────────────────────────
+  # Runs only on ubuntu-24.04 x86_64: this platform reliably supports native
+  # XDP on veth (kernel 6.8) and provides a recent bpftool.
+  connectivity:
+    name: Connectivity Test · ubuntu-24.04 · x86_64
+    needs: build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: xdp-redirect-ubuntu-24.04-x86_64
+
+      - name: Make binaries executable
+        run: chmod +x xdp_prog_user setup_netns.sh
+
+      - name: Install runtime dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y iproute2 netcat-openbsd \
+            linux-tools-$(uname -r) 2>/dev/null || \
+          sudo apt-get install -y iproute2 netcat-openbsd linux-tools-generic
+
+      - name: Kernel and bpftool info
+        run: |
+          uname -r
+          bpftool version
+
+      - name: Setup namespaces and load XDP
+        run: sudo bash setup_netns.sh
+
+      - name: Verify XDP programs are attached
+        run: |
+          sudo bpftool net show
+          sudo nsenter --net=/var/run/netns/ns1 bpftool net show
+          sudo nsenter --net=/var/run/netns/ns2 bpftool net show
+
+      - name: ICMP · NS1 → NS2
+        run: |
+          sudo ip netns exec ns1 ping -c 5 -W 2 10.0.1.2
+          echo "✓ ICMP NS1 → NS2"
+
+      - name: ICMP · NS2 → NS1
+        run: |
+          sudo ip netns exec ns2 ping -c 5 -W 2 10.0.1.1
+          echo "✓ ICMP NS2 → NS1"
+
+      - name: TCP · NS1 → NS2
+        run: |
+          sudo ip netns exec ns2 nc -l -p 8080 -q1 > /tmp/tcp_ns1_ns2 &
+          sleep 0.3
+          echo "hello from ns1" | sudo ip netns exec ns1 nc -w3 -q1 10.0.1.2 8080
+          wait
+          grep -q "hello from ns1" /tmp/tcp_ns1_ns2 \
+            && echo "✓ TCP NS1 → NS2" \
+            || { echo "✗ TCP NS1 → NS2 FAILED"; cat /tmp/tcp_ns1_ns2; exit 1; }
+
+      - name: TCP · NS2 → NS1
+        run: |
+          sudo ip netns exec ns1 nc -l -p 8080 -q1 > /tmp/tcp_ns2_ns1 &
+          sleep 0.3
+          echo "hello from ns2" | sudo ip netns exec ns2 nc -w3 -q1 10.0.1.1 8080
+          wait
+          grep -q "hello from ns2" /tmp/tcp_ns2_ns1 \
+            && echo "✓ TCP NS2 → NS1" \
+            || { echo "✗ TCP NS2 → NS1 FAILED"; cat /tmp/tcp_ns2_ns1; exit 1; }
+
+      - name: XDP redirect stats
+        run: |
+          echo "── xdp_stats (key=4 is XDP_REDIRECT) ──"
+          sudo bpftool map dump pinned /sys/fs/bpf/xdp/globals/xdp_stats
+
+      - name: Cleanup
+        if: always()
+        run: |
+          sudo ip netns del ns1 2>/dev/null || true
+          sudo ip netns del ns2 2>/dev/null || true
+          sudo ip link del v1-host 2>/dev/null || true
+          sudo ip link del v2-host 2>/dev/null || true
+          sudo rm -rf /sys/fs/bpf/xdp/ 2>/dev/null || true
