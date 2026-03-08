@@ -101,8 +101,10 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y iproute2 netcat-openbsd
-          # GitHub Actions runners run on Azure kernels (e.g. 6.14.0-xxxx-azure).
-          # Try in order: kernel-specific → azure → generic.
+          # Ubuntu 24.04 ships a standalone bpftool package (independent of
+          # kernel version). Fall back to kernel-specific / azure / generic
+          # variants for older releases or unusual kernels.
+          sudo apt-get install -y bpftool                 2>/dev/null || \
           sudo apt-get install -y linux-tools-$(uname -r) 2>/dev/null || \
           sudo apt-get install -y linux-tools-azure       2>/dev/null || \
           sudo apt-get install -y linux-tools-generic
