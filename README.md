@@ -136,45 +136,16 @@ bpftool net attach xdp id $V1_PROG dev v2-host
 
 ## XDP 程序段
 
-`xdp_prog_kern.c` 中包含三个独立的 SEC：
+`xdp_prog_kern.c` 中包含两个 SEC：
 
 | Section | 函数 | 挂载位置 | 用途 |
 |---------|------|----------|------|
 | `xdp_redirect_map` | `xdp_redirect_map_func` | v1-host、v2-host | 查 Map 改写目标 MAC，全量重算 checksum，重定向到对端 |
-| `xdp_icmp_echo` | `xdp_icmp_echo_func` | 可选，单独挂载 | 解析 ICMP/ICMPv6，交换地址，增量更新 checksum，返回 `XDP_TX` |
 | `xdp_pass` | `xdp_pass_func` | v1-ns1、v2-ns2 | 直接返回 `XDP_PASS`，满足 veth `ndo_xdp_xmit` 要求 |
-
-两个业务 SEC 分工明确：
-- **`xdp_redirect_map`** — L2 转发，不关心协议内容
-- **`xdp_icmp_echo`** — 数据包检验与响应，不依赖 Map，可独立挂载到任意接口
 
 ---
 
 ## Checksum 处理策略
-
-项目中的两个业务程序段针对各自场景选择了不同的 checksum 策略。
-
-### 增量更新（`xdp_icmp_echo`）
-
-ICMP echo reply 只修改了 `type` 字段（1 字节），无需扫描整个 payload。使用 RFC 1624 增量公式：
-
-```
-new_csum = fold( bpf_csum_diff(old_region, new_region, ~old_csum) )
-```
-
-实现步骤：
-
-```c
-old_csum       = icmphdr->cksum;   // 1. 保存原始校验和
-icmphdr->cksum = 0;                // 2. 清零（校验和字段不参与计算）
-icmphdr_old    = *icmphdr;         // 3. 栈上备份修改前的 4 字节头
-icmphdr->type  = echo_reply;       // 4. 写入新 type
-icmphdr->cksum = icmp_checksum_diff(~old_csum, icmphdr, &icmphdr_old);
-// bpf_csum_diff 计算: ~old_csum + sum(new) - sum(old)
-// csum_fold_helper 折叠 64 位 → 16 位并取反 = 新校验和
-```
-
-`icmphdr_old` 在栈上，`bpf_csum_diff` 不受 packet-pointer range 限制；`sizeof(struct icmphdr_common) == 4` 满足 `bpf_csum_diff` 的 4 字节对齐要求。
 
 ### 全量重算（`xdp_redirect_map`）
 
@@ -454,5 +425,4 @@ sudo rm -rf /sys/fs/bpf/xdp/
 | Section | 函数 | Checksum 策略 | 用途 |
 |---------|------|---------------|------|
 | `xdp_redirect_map` | `xdp_redirect_map_func` | 全量重算（`fix_checksums`） | 查 Map 改写 MAC，重定向到对端接口 |
-| `xdp_icmp_echo` | `xdp_icmp_echo_func` | 增量更新（`icmp_checksum_diff`） | ICMP/ICMPv6 echo 响应，交换地址，`XDP_TX` |
 | `xdp_pass` | `xdp_pass_func` | 无 | 返回 `XDP_PASS`，挂在 NS 侧满足 veth 要求 |

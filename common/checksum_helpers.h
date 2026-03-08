@@ -250,33 +250,4 @@ static __always_inline int update_icmp_checksum(struct icmphdr *icmph,
 	return 0;
 }
 
-/*
- * icmp_checksum_diff - incremental ICMP/ICMPv6 checksum update.
- *
- * Used when only the type byte of an ICMP header changes (e.g. ECHO →
- * ECHOREPLY).  Computes the difference between the old and new 4-byte
- * icmphdr_common regions and folds it into the existing checksum.
- *
- *   seed         - one's complement of the original checksum (~old_csum)
- *   icmphdr_new  - pointer to the (already-modified) header in the packet
- *   icmphdr_old  - stack copy of the header taken before modification
- *
- * Both structs are exactly sizeof(struct icmphdr_common) = 4 bytes, which
- * is a multiple of 4 as required by bpf_csum_diff().  icmphdr_old is on
- * the stack so there is no packet-pointer range restriction; icmphdr_new is
- * a packet pointer whose 4-byte range was established by parse_icmphdr_common.
- */
-static __always_inline __u16 icmp_checksum_diff(
-		__u16 seed,
-		struct icmphdr_common *icmphdr_new,
-		struct icmphdr_common *icmphdr_old)
-{
-	__u32 size = sizeof(struct icmphdr_common);
-	__u64 csum;
-
-	csum = bpf_csum_diff((__be32 *)icmphdr_old, size,
-			     (__be32 *)icmphdr_new, size, seed);
-	return csum_fold_helper(csum);
-}
-
 #endif /* __CHECKSUM_HELPERS_H */
