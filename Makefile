@@ -30,7 +30,8 @@ USER_PROG := xdp_prog_user
 all: $(OBJ) $(USER_PROG)
 
 # Compile XDP kernel program
-$(OBJ): xdp_prog_kern.c common/parsing_helpers.h common/rewrite_helpers.h
+$(OBJ): xdp_prog_kern.c common/parsing_helpers.h common/rewrite_helpers.h \
+        common/checksum_helpers.h common/xdp_stats.h
 	$(CLANG) $(BPF_CFLAGS) $(CFLAGS) $(KERNEL_INCLUDE) -target bpf -c $< -o $@
 
 # Compile user space program
