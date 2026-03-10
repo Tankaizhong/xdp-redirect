@@ -24,7 +24,8 @@ POD_NAME="$1"
 POD_IP="$2"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-XDP_USER="${SCRIPT_DIR}/xdp_prog_user"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+XDP_USER="${ROOT_DIR}/xdp_prog_user"
 
 NS_NAME="ns_${POD_NAME}"
 VETH_HOST="${POD_NAME}-host"

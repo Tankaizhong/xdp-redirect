@@ -40,8 +40,9 @@ POD_IP="$2"
 HOST_IP="${3:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-XDP_OBJ="${SCRIPT_DIR}/xdp_prog_kern.o"
-XDP_USER="${SCRIPT_DIR}/xdp_prog_user"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+XDP_OBJ="${ROOT_DIR}/xdp_prog_kern.o"
+XDP_USER="${ROOT_DIR}/xdp_prog_user"
 PIN_BASE="/sys/fs/bpf/xdp_ipip"
 
 NS_NAME="ns_${POD_NAME}"

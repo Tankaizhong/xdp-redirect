@@ -32,7 +32,8 @@ REMOTE_HOST_IP="$2"
 REMOTE_HOST_MAC="$3"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-XDP_USER="${SCRIPT_DIR}/xdp_prog_user"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+XDP_USER="${ROOT_DIR}/xdp_prog_user"
 
 echo "=== 添加远程路由 ==="
 "$XDP_USER" route add "$POD_IP" "$REMOTE_HOST_IP" "$REMOTE_HOST_MAC"
