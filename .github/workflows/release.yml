@@ -41,7 +41,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y \
             clang llvm \
-            libelf-dev libpcap-dev libbpf-dev \
+            libbpf-dev \
             build-essential \
             linux-headers-$(uname -r) \
             ${{ matrix.extra_packages }}
@@ -55,13 +55,13 @@ jobs:
           TAG=${GITHUB_REF_NAME}
           OS=$(echo "${{ matrix.os }}" | tr '.' '-')   # ubuntu-22-04
           ARCH=${{ matrix.arch }}
-          DIST="xdp-redirect-${TAG}-${OS}-${ARCH}"
+          DIST="xdp-ipip-overlay-${TAG}-${OS}-${ARCH}"
 
-          mkdir -p "$DIST"
-          cp xdp_prog_kern.o "$DIST/"
-          cp xdp_prog_user   "$DIST/"
-          cp setup_netns.sh  "$DIST/"
-          cp README.md       "$DIST/"
+          mkdir -p "$DIST/scripts"
+          cp xdp_prog_kern.o  "$DIST/"
+          cp xdp_prog_user    "$DIST/"
+          cp scripts/*.sh     "$DIST/scripts/"
+          cp README.md        "$DIST/"
 
           tar czf "${DIST}.tar.gz" "$DIST"
           echo "DIST_FILE=${DIST}.tar.gz" >> "$GITHUB_ENV"
@@ -69,7 +69,7 @@ jobs:
       - name: Upload release artifact
         uses: actions/upload-artifact@v4
         with:
-          name: release-${{ matrix.os }}-${{ matrix.arch }}
+          name: release-ipip-${{ matrix.os }}-${{ matrix.arch }}
           path: "*.tar.gz"
 
   # ────────────────────────────────────────────────────────────────────────
@@ -89,7 +89,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: dist/
-          pattern: release-*
+          pattern: release-ipip-*
           merge-multiple: true
 
       - name: List collected artifacts
@@ -120,9 +120,13 @@ jobs:
 
             | File | Description |
             |------|-------------|
-            | `xdp_prog_kern.o` | BPF bytecode (architecture-independent) |
-            | `xdp_prog_user`   | User-space configuration tool (per-arch) |
-            | `setup_netns.sh`  | One-shot setup script |
+            | `xdp_prog_kern.o`        | BPF bytecode (architecture-independent) |
+            | `xdp_prog_user`          | User-space map management tool (per-arch) |
+            | `scripts/setup_host.sh`  | Initialize XDP programs on a host |
+            | `scripts/add_pod.sh`     | Add a pod (netns + veth) and register it |
+            | `scripts/del_pod.sh`     | Remove a pod and clean up map entries |
+            | `scripts/add_remote_route.sh` | Add a cross-host routing entry |
+            | `scripts/teardown_host.sh`    | Detach XDP and clean up all state |
 
             ## Supported Platforms
 
@@ -136,10 +140,14 @@ jobs:
             ## Quick Start
 
             ```bash
-            tar xzf xdp-redirect-*.tar.gz
-            cd xdp-redirect-*/
-            sudo bash setup_netns.sh
-            sudo ip netns exec ns1 ping 10.0.1.2
+            tar xzf xdp-ipip-overlay-*.tar.gz
+            cd xdp-ipip-overlay-*/
+            # Initialize XDP on the host (attach to eth0 + pod veths)
+            sudo bash scripts/setup_host.sh <host_ip> <eth_iface>
+            # Add a pod
+            sudo bash scripts/add_pod.sh pod1 10.244.1.10
+            # Verify cross-host connectivity
+            sudo ip netns exec ns_pod1 ping 10.244.2.10
             ```
           files: dist/*.tar.gz
           draft: false

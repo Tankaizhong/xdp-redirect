@@ -43,7 +43,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y \
             clang llvm \
-            libelf-dev libpcap-dev libbpf-dev \
+            libbpf-dev \
             build-essential \
             linux-headers-$(uname -r) \
             ${{ matrix.extra_packages }}
@@ -61,6 +61,11 @@ jobs:
           echo "── BPF sections ──"
           llvm-objdump -h xdp_prog_kern.o \
             | awk 'NR<=4 || /xdp_|\.maps/ {print}'
+          for sec in xdp_pod_egress xdp_eth_ingress xdp_pass; do
+            llvm-objdump -h xdp_prog_kern.o | grep -q "$sec" \
+              && echo "✓ $sec" \
+              || { echo "✗ $sec missing"; exit 1; }
+          done
 
       - name: Verify ARCH macro in object
         run: |
@@ -73,7 +78,7 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: xdp-redirect-${{ matrix.os }}-${{ matrix.arch }}
+          name: xdp-ipip-overlay-${{ matrix.os }}-${{ matrix.arch }}
           path: |
             xdp_prog_kern.o
             xdp_prog_user
