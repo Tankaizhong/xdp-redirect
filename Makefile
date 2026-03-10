@@ -21,7 +21,7 @@ $(OBJ): xdp_prog_kern.c common/parsing_helpers.h common/checksum_helpers.h commo
 	$(CLANG) $(BPF_CFLAGS) $(CFLAGS) $(KERNEL_INCLUDE) -target bpf -c $< -o $@
 
 $(USER_PROG): xdp_prog_user.c
-	$(CLANG) $(CFLAGS) -o $@ $<
+	$(CLANG) $(CFLAGS) -o $@ $< -lbpf
 
 clean:
 	rm -f $(OBJ) $(USER_PROG)

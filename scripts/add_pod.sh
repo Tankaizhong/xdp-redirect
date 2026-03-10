@@ -43,7 +43,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 XDP_OBJ="${ROOT_DIR}/xdp_prog_kern.o"
 XDP_USER="${ROOT_DIR}/xdp_prog_user"
-PIN_BASE="/sys/fs/bpf/xdp_ipip"
+PIN_PFX="/sys/fs/bpf/xdp_ipip_"
 
 NS_NAME="ns_${POD_NAME}"
 VETH_NS="${POD_NAME}-ns"
@@ -54,28 +54,23 @@ VETH_HOST="${POD_NAME}-host"
 if [ ! -f "$XDP_OBJ" ]; then
     echo "错误: $XDP_OBJ 不存在"; exit 1
 fi
-if [ ! -f "$PIN_BASE/routing_map" ]; then
+if [ ! -f "${PIN_PFX}routing_map" ]; then
     echo "错误: 共享 maps 不存在，请先运行 setup_host.sh"; exit 1
 fi
-if [ ! -f "$PIN_BASE/pod_egress_prog" ]; then
+if [ ! -f "${PIN_PFX}pod_egress_prog" ]; then
     echo "错误: pinned pod_egress_prog 不存在，请先运行 setup_host.sh"; exit 1
 fi
 
-# 如果未指定 HOST_IP，尝试从 host_config 推断
+# 读取 HOST_IP 和 ETH_MAC：直接从 host_config map 读取
+HOST_CFG=$("$XDP_USER" host get 2>/dev/null || true)
 if [ -z "$HOST_IP" ]; then
-    # bpftool map dump 输出的 host_config 第一个 4 字节就是 host_ip
-    HOST_IP_HEX=$(bpftool map dump pinned "$PIN_BASE/host_config" 2>/dev/null \
-        | grep -A1 'value:' | tail -1 | awk '{printf "%s.%s.%s.%s", strtonum("0x"$1), strtonum("0x"$2), strtonum("0x"$3), strtonum("0x"$4)}')
-    if [ -z "$HOST_IP_HEX" ] || [ "$HOST_IP_HEX" = "0.0.0.0" ]; then
+    HOST_IP=$(echo "$HOST_CFG" | awk '{print $1}')
+    if [ -z "$HOST_IP" ] || [ "$HOST_IP" = "0.0.0.0" ]; then
         echo "错误: 无法从 host_config 读取宿主机 IP，请用第三个参数指定"
         exit 1
     fi
-    HOST_IP="$HOST_IP_HEX"
 fi
-
-ETH_MAC=$(bpftool map dump pinned "$PIN_BASE/host_config" 2>/dev/null \
-    | grep -A1 'value:' | tail -1 \
-    | awk '{printf "%s:%s:%s:%s:%s:%s", $9,$10,$11,$12,$13,$14}' 2>/dev/null || echo "")
+ETH_MAC=$(echo "$HOST_CFG" | awk '{print $2}')
 
 echo "=========================================="
 echo "  添加 Pod: $POD_NAME"
@@ -124,16 +119,8 @@ echo "=== 加载 XDP ==="
 ip netns exec "$NS_NAME" ip link set dev "$VETH_NS" xdp obj "$XDP_OBJ" sec xdp_pass
 echo "  xdp_pass → $NS_NAME/$VETH_NS"
 
-# Host 侧: 复用 pinned 的 xdp_pod_egress 程序（共享 maps）
-EGRESS_PROG_ID=$(bpftool prog show pinned "$PIN_BASE/pod_egress_prog" 2>/dev/null | head -1 | awk '{print $1}' | tr -d ':')
-
-if [ -n "$EGRESS_PROG_ID" ]; then
-    bpftool net attach xdp id "$EGRESS_PROG_ID" dev "$VETH_HOST"
-    echo "  xdp_pod_egress → $VETH_HOST (shared prog id=$EGRESS_PROG_ID)"
-else
-    echo "警告: 无法读取 pinned prog，直接加载（maps 不共享）"
-    ip link set dev "$VETH_HOST" xdp obj "$XDP_OBJ" sec xdp_pod_egress
-fi
+ip link set dev "$VETH_HOST" xdp pinned "${PIN_PFX}pod_egress_prog"
+echo "  xdp_pod_egress → $VETH_HOST (shared pinned prog)"
 
 # ── 4. 更新 eBPF maps ────────────────────────────────────────────────────────
 
