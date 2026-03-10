@@ -32,7 +32,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 XDP_OBJ="${ROOT_DIR}/xdp_prog_kern.o"
 XDP_USER="${ROOT_DIR}/xdp_prog_user"
-PIN_BASE="/sys/fs/bpf/xdp_ipip"
+PIN_PFX="/sys/fs/bpf/xdp_ipip_"
 
 # ── 前置检查 ─────────────────────────────────────────────────────────────────
 
@@ -70,7 +70,7 @@ if ! mount | grep -q '/sys/fs/bpf type bpf'; then
 else
     echo "  bpffs 已存在"
 fi
-mkdir -p "$PIN_BASE"
+# No subdirectory needed: pins go flat under /sys/fs/bpf/
 
 # ── 2. 清理旧的 XDP 程序（如果有）──────────────────────────────────────────
 
@@ -86,7 +86,7 @@ echo "=== 加载 BPF 程序 ==="
 # ── 4. 将 xdp_eth_ingress 挂载到物理网卡 ────────────────────────────────────
 
 echo "=== 挂载 xdp_eth_ingress → $ETH_DEV ==="
-ip link set dev "$ETH_DEV" xdp pinned "$PIN_BASE/eth_ingress_prog"
+ip link set dev "$ETH_DEV" xdp pinned "${PIN_PFX}eth_ingress_prog"
 echo "  xdp_eth_ingress → $ETH_DEV"
 
 # ── 5. 配置 host_config 和注册 eth tx_port ──────────────────────────────────

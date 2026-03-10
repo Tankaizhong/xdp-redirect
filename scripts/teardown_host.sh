@@ -12,7 +12,7 @@
 set -e
 
 ETH_DEV="${1:-}"
-PIN_BASE="/sys/fs/bpf/xdp_ipip"
+PIN_PFX="/sys/fs/bpf/xdp_ipip_"
 
 echo "=== 清理 XDP IPIP Overlay ==="
 
@@ -36,8 +36,10 @@ for dev in $(ip -br link show 2>/dev/null | awk '/-host/{print $1}'); do
 done
 
 # 3. 清理 pinned maps 和程序
-rm -rf "$PIN_BASE"
-echo "  清理 pinned: $PIN_BASE"
+rm -f "${PIN_PFX}"routing_map "${PIN_PFX}"delivery_map \
+      "${PIN_PFX}"host_config "${PIN_PFX}"tx_ports \
+      "${PIN_PFX}"pod_egress_prog "${PIN_PFX}"eth_ingress_prog
+echo "  清理 pinned: ${PIN_PFX}*"
 
 echo ""
 echo "=== 清理完成 ==="

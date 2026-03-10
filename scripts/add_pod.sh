@@ -43,7 +43,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 XDP_OBJ="${ROOT_DIR}/xdp_prog_kern.o"
 XDP_USER="${ROOT_DIR}/xdp_prog_user"
-PIN_BASE="/sys/fs/bpf/xdp_ipip"
+PIN_PFX="/sys/fs/bpf/xdp_ipip_"
 
 NS_NAME="ns_${POD_NAME}"
 VETH_NS="${POD_NAME}-ns"
@@ -54,10 +54,10 @@ VETH_HOST="${POD_NAME}-host"
 if [ ! -f "$XDP_OBJ" ]; then
     echo "错误: $XDP_OBJ 不存在"; exit 1
 fi
-if [ ! -f "$PIN_BASE/routing_map" ]; then
+if [ ! -f "${PIN_PFX}routing_map" ]; then
     echo "错误: 共享 maps 不存在，请先运行 setup_host.sh"; exit 1
 fi
-if [ ! -f "$PIN_BASE/pod_egress_prog" ]; then
+if [ ! -f "${PIN_PFX}pod_egress_prog" ]; then
     echo "错误: pinned pod_egress_prog 不存在，请先运行 setup_host.sh"; exit 1
 fi
 
@@ -119,7 +119,7 @@ echo "=== 加载 XDP ==="
 ip netns exec "$NS_NAME" ip link set dev "$VETH_NS" xdp obj "$XDP_OBJ" sec xdp_pass
 echo "  xdp_pass → $NS_NAME/$VETH_NS"
 
-ip link set dev "$VETH_HOST" xdp pinned "$PIN_BASE/pod_egress_prog"
+ip link set dev "$VETH_HOST" xdp pinned "${PIN_PFX}pod_egress_prog"
 echo "  xdp_pod_egress → $VETH_HOST (shared pinned prog)"
 
 # ── 4. 更新 eBPF maps ────────────────────────────────────────────────────────

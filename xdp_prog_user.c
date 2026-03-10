@@ -26,7 +26,9 @@
 #include <bpf/libbpf.h>
 
 #define ETH_ALEN  6
-#define PIN_BASE  "/sys/fs/bpf/xdp_ipip"
+/* All pins live flat under /sys/fs/bpf/, prefixed with xdp_ipip_ */
+#define PIN_PFX   "/sys/fs/bpf/xdp_ipip_"
+#define PIN_BASE  "/sys/fs/bpf"
 
 /* ── structs matching common/xdp_maps.h ─────────────────────────────────── */
 
@@ -65,7 +67,7 @@ static int parse_mac(const char *str, unsigned char *mac)
 static int open_map(const char *name)
 {
 	char path[256];
-	snprintf(path, sizeof(path), PIN_BASE "/%s", name);
+	snprintf(path, sizeof(path), PIN_PFX "%s", name);
 	int fd = bpf_obj_get(path);
 	if (fd < 0)
 		fprintf(stderr, "bpf_obj_get(%s): %s\n", path, strerror(errno));
@@ -88,11 +90,10 @@ static int get_ifindex(const char *s)
 
 static int cmd_load(const char *obj_file)
 {
-	mkdir(PIN_BASE, 0700);
-
-	/* Idempotent: skip if maps already pinned */
-	if (access(PIN_BASE "/routing_map", F_OK) == 0) {
-		printf("maps already pinned at " PIN_BASE ", skipping load\n");
+	/* Idempotent: skip if already fully pinned */
+	if (access(PIN_PFX "routing_map", F_OK) == 0 &&
+	    access(PIN_PFX "eth_ingress_prog", F_OK) == 0) {
+		printf("already pinned, skipping load\n");
 		return 0;
 	}
 
@@ -114,15 +115,32 @@ static int cmd_load(const char *obj_file)
 		return 1;
 	}
 
-	/* Pin all maps (creates PIN_BASE/<map_name>) */
-	if (bpf_object__pin_maps(obj, PIN_BASE)) {
-		fprintf(stderr, "bpf_object__pin_maps: %s\n", strerror(errno));
-		bpf_object__close(obj);
-		return 1;
+	/* Pin each map individually to flat path PIN_PFX<map_name> */
+	static const char *map_names[] = {
+		"routing_map", "delivery_map", "host_config", "tx_ports",
+	};
+	for (int i = 0; i < 4; i++) {
+		struct bpf_map *map =
+			bpf_object__find_map_by_name(obj, map_names[i]);
+		if (!map) {
+			fprintf(stderr, "map %s not found\n", map_names[i]);
+			bpf_object__close(obj);
+			return 1;
+		}
+		char pin_path[256];
+		snprintf(pin_path, sizeof(pin_path), PIN_PFX "%s", map_names[i]);
+		/* Remove stale pin if present from a previous failed run */
+		unlink(pin_path);
+		if (bpf_map__pin(map, pin_path)) {
+			fprintf(stderr, "bpf_map__pin(%s): %s\n",
+				pin_path, strerror(errno));
+			bpf_object__close(obj);
+			return 1;
+		}
+		printf("pinned map: %s\n", pin_path);
 	}
-	printf("maps pinned to " PIN_BASE "\n");
 
-	/* Pin specific programs by C function name */
+	/* Pin programs to flat path PIN_PFX<prog_pin_name> */
 	static const struct { const char *func; const char *pin; } progs[] = {
 		{ "xdp_pod_egress_func",  "pod_egress_prog"  },
 		{ "xdp_eth_ingress_func", "eth_ingress_prog" },
@@ -135,14 +153,15 @@ static int cmd_load(const char *obj_file)
 			return 1;
 		}
 		char pin_path[256];
-		snprintf(pin_path, sizeof(pin_path), PIN_BASE "/%s", progs[i].pin);
+		snprintf(pin_path, sizeof(pin_path), PIN_PFX "%s", progs[i].pin);
+		unlink(pin_path);
 		if (bpf_program__pin(prog, pin_path)) {
 			fprintf(stderr, "bpf_program__pin(%s): %s\n",
 				pin_path, strerror(errno));
 			bpf_object__close(obj);
 			return 1;
 		}
-		printf("pinned: %s → %s\n", progs[i].func, pin_path);
+		printf("pinned prog: %s → %s\n", progs[i].func, pin_path);
 	}
 
 	bpf_object__close(obj);
