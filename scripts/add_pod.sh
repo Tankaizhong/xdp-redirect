@@ -63,9 +63,14 @@ fi
 
 # 如果未指定 HOST_IP，尝试从 host_config 推断
 if [ -z "$HOST_IP" ]; then
-    # bpftool map dump 输出的 host_config 第一个 4 字节就是 host_ip
-    HOST_IP_HEX=$(bpftool map dump pinned "$PIN_BASE/host_config" 2>/dev/null \
-        | grep -A1 'value:' | tail -1 | awk '{printf "%s.%s.%s.%s", strtonum("0x"$1), strtonum("0x"$2), strtonum("0x"$3), strtonum("0x"$4)}')
+    # bpftool map dump 输出 value 行的前 4 字节是 host_ip（十六进制）
+    # 用 shell printf 替代 gawk 的 strtonum
+    VALUE_LINE=$(bpftool map dump pinned "$PIN_BASE/host_config" 2>/dev/null \
+        | grep 'value:' | head -1 | sed 's/value://' | xargs)
+    if [ -n "$VALUE_LINE" ]; then
+        set -- $VALUE_LINE
+        HOST_IP_HEX=$(printf "%d.%d.%d.%d" "0x${1}" "0x${2}" "0x${3}" "0x${4}" 2>/dev/null)
+    fi
     if [ -z "$HOST_IP_HEX" ] || [ "$HOST_IP_HEX" = "0.0.0.0" ]; then
         echo "错误: 无法从 host_config 读取宿主机 IP，请用第三个参数指定"
         exit 1
@@ -73,9 +78,14 @@ if [ -z "$HOST_IP" ]; then
     HOST_IP="$HOST_IP_HEX"
 fi
 
-ETH_MAC=$(bpftool map dump pinned "$PIN_BASE/host_config" 2>/dev/null \
-    | grep -A1 'value:' | tail -1 \
-    | awk '{printf "%s:%s:%s:%s:%s:%s", $9,$10,$11,$12,$13,$14}' 2>/dev/null || echo "")
+# 读取 ETH_MAC：value 的第 9-14 字节（偏移 8，对应 host_info.eth_mac）
+ETH_MAC=""
+VALUE_LINE=$(bpftool map dump pinned "$PIN_BASE/host_config" 2>/dev/null \
+    | grep 'value:' | head -1 | sed 's/value://' | xargs)
+if [ -n "$VALUE_LINE" ]; then
+    set -- $VALUE_LINE
+    ETH_MAC=$(printf "%s:%s:%s:%s:%s:%s" "$9" "${10}" "${11}" "${12}" "${13}" "${14}" 2>/dev/null)
+fi
 
 echo "=========================================="
 echo "  添加 Pod: $POD_NAME"
