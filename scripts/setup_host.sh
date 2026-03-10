@@ -39,8 +39,9 @@ HOST_IP="$1"
 ETH_DEV="$2"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-XDP_OBJ="${SCRIPT_DIR}/xdp_prog_kern.o"
-XDP_USER="${SCRIPT_DIR}/xdp_prog_user"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+XDP_OBJ="${ROOT_DIR}/xdp_prog_kern.o"
+XDP_USER="${ROOT_DIR}/xdp_prog_user"
 PIN_BASE="/sys/fs/bpf/xdp_ipip"
 
 # ── 前置检查 ─────────────────────────────────────────────────────────────────
