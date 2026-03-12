@@ -13,6 +13,7 @@
  *                 physical network / veth to root NS
  *
  * SEC("xdp_pod_egress") — runs on pod-facing veth (host side).
+ *   0. If ARP request → check routing_map, reply with host veth MAC.
  *   1. Parse inner IPv4 dst_ip.
  *   2. Look up routing_map[dst_ip] → {host_ip, host_mac}.
  *   3. If host_ip == local host IP → local delivery:
@@ -37,12 +38,13 @@
  *   7. Fix checksums on inner packet.
  *   8. bpf_redirect_map(&tx_ports, ifindex) → deliver to local pod.
  *
- * SEC("xdp_pass") — no-op for namespace-side veth peers.
+ * SEC("xdp_pass") – No-op program for namespace-side veth peers.
  */
 
 #include <linux/bpf.h>
 #include <linux/in.h>
 #include <linux/if_ether.h>
+#include <linux/if_arp.h>
 #include <linux/ip.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
@@ -63,6 +65,105 @@
 #include "common/parsing_helpers.h"
 #include "common/checksum_helpers.h"
 #include "common/xdp_maps.h"
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * ARP packet layout (for Ethernet + IPv4):
+ *
+ *   struct arphdr        (8 bytes: hrd, pro, hln, pln, op)
+ *   sender MAC           (6 bytes)
+ *   sender IP            (4 bytes)
+ *   target MAC           (6 bytes)
+ *   target IP            (4 bytes)
+ *
+ * Total ARP payload = 8 + 6 + 4 + 6 + 4 = 28 bytes
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+struct arp_ipv4_payload {
+	unsigned char sender_mac[ETH_ALEN];
+	__be32        sender_ip;
+	unsigned char target_mac[ETH_ALEN];
+	__be32        target_ip;
+} __attribute__((packed));
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * handle_arp – XDP ARP 代答
+ *
+ * 收到 pod 发出的 ARP request 时：
+ *   1. 检查 target IP 是否在 routing_map 中（即我们知道这个目标）
+ *   2. 如果知道，构造 ARP reply，用 host 侧 veth 的入口 MAC 回应
+ *   3. XDP_TX 原路发回给 pod
+ *
+ * 这样 pod 的内核就能解析邻居，顺利把 IP 包发出来交给 xdp_pod_egress。
+ * ──────────────────────────────────────────────────────────────────────────── */
+static __always_inline int handle_arp(struct xdp_md *ctx)
+{
+	void *data     = (void *)(long)ctx->data;
+	void *data_end = (void *)(long)ctx->data_end;
+
+	struct ethhdr *eth = data;
+	if ((void *)(eth + 1) > data_end)
+		return XDP_PASS;
+
+	/* ARP header 紧跟 Ethernet header */
+	struct arphdr *arph = (void *)(eth + 1);
+	if ((void *)(arph + 1) > data_end)
+		return XDP_PASS;
+
+	/* 只处理 Ethernet + IPv4 的 ARP request */
+	if (arph->ar_hrd != bpf_htons(ARPHRD_ETHER) ||
+	    arph->ar_pro != bpf_htons(ETH_P_IP) ||
+	    arph->ar_hln != ETH_ALEN ||
+	    arph->ar_pln != 4 ||
+	    arph->ar_op  != bpf_htons(ARPOP_REQUEST))
+		return XDP_PASS;
+
+	/* ARP payload 紧跟 ARP header */
+	struct arp_ipv4_payload *arp_data = (void *)(arph + 1);
+	if ((void *)(arp_data + 1) > data_end)
+		return XDP_PASS;
+
+	/* 检查 target IP 是否在 routing_map 中（我们管理的 pod IP） */
+	__u32 target_ip = arp_data->target_ip; /* 已经是 network byte order */
+	struct route_entry *route = bpf_map_lookup_elem(&routing_map, &target_ip);
+	if (!route)
+		return XDP_PASS; /* 不认识的 IP，交给内核处理 */
+
+	/* ── 构造 ARP reply ─────────────────────────────────────────────── */
+
+	/* 用入口接口（host 侧 veth）的 MAC 作为回应
+	 * 因为 xdp_pod_egress 在转发 IP 包时会改写 MAC，
+	 * 这里只要给 pod 一个有效的 MAC 让它能发包就行。
+	 * 我们用 eth->h_dest（即 host 侧 veth 的 MAC，广播时为 ff:ff:ff:ff:ff:ff）
+	 * 不对——广播包的 h_dest 是 ff:ff:ff:ff:ff:ff。
+	 * 用 host_config 里的 eth_mac 作为回应 MAC。
+	 */
+	__u32 zero = 0;
+	struct host_info *local = bpf_map_lookup_elem(&host_config, &zero);
+	if (!local)
+		return XDP_PASS;
+
+	/* 保存 sender 信息（即发起 ARP 的 pod） */
+	unsigned char sender_mac[ETH_ALEN];
+	__be32 sender_ip;
+	memcpy(sender_mac, arp_data->sender_mac, ETH_ALEN);
+	sender_ip = arp_data->sender_ip;
+
+	/* ARP reply: op = 2 */
+	arph->ar_op = bpf_htons(ARPOP_REPLY);
+
+	/* ARP payload: sender = 我们（用 eth_mac 代答），target = 原来的 sender */
+	memcpy(arp_data->sender_mac, local->eth_mac, ETH_ALEN);
+	arp_data->sender_ip = target_ip;
+	memcpy(arp_data->target_mac, sender_mac, ETH_ALEN);
+	arp_data->target_ip = sender_ip;
+
+	/* Ethernet header: dst = 原 sender（pod），src = 我们的 MAC */
+	memcpy(eth->h_dest,   sender_mac,    ETH_ALEN);
+	memcpy(eth->h_source, local->eth_mac, ETH_ALEN);
+
+	/* XDP_TX: 从同一个接口（host 侧 veth）发回给 pod */
+	return XDP_TX;
+}
 
 /* ────────────────────────────────────────────────────────────────────────────
  * fix_inner_checksums – recompute IP + L4 checksums for the inner packet.
@@ -126,6 +227,7 @@ static __always_inline int fix_inner_checksums(void *data, void *data_end)
  *
  * This program is attached to the HOST side of each pod's veth pair.
  * When a pod sends a packet, it arrives here. We decide:
+ *   - ARP request → XDP reply directly (no kernel involvement)
  *   - local delivery (same host) → redirect to target pod's veth
  *   - remote delivery → IPIP encapsulate → redirect to eth interface
  * ──────────────────────────────────────────────────────────────────────────── */
@@ -140,8 +242,16 @@ int xdp_pod_egress_func(struct xdp_md *ctx)
 	int eth_type, ip_proto;
 	__u32 dst_ip;
 
-	/* Parse Ethernet + IPv4 to get destination pod IP */
+	/* Parse Ethernet header */
 	eth_type = parse_ethhdr(&nh, data_end, &eth);
+	if (eth_type < 0)
+		return XDP_PASS;
+
+	/* ── ARP 代答：在 XDP 层直接回复，不依赖内核 proxy_arp ────────── */
+	if (eth_type == bpf_htons(ETH_P_ARP))
+		return handle_arp(ctx);
+
+	/* ── 以下处理 IPv4 数据包 ─────────────────────────────────────── */
 	if (eth_type != bpf_htons(ETH_P_IP))
 		return XDP_PASS;
 
@@ -211,47 +321,10 @@ int xdp_pod_egress_func(struct xdp_md *ctx)
 		if ((void *)(outer_iph + 1) > data_end)
 			return XDP_PASS;
 
-		/* The old eth header is now 20 bytes into the packet.
-		 * We need to copy it to the new position and build
-		 * the outer IP header in between.
-		 *
-		 * Actually, after adjust_head, the layout is:
-		 *   [20 bytes new space][old eth header][old IP header][...]
-		 *
-		 * We want:
-		 *   [new eth header][outer IP header][inner IP header][...]
-		 *
-		 * So we need to:
-		 *   1. Read the old eth header (at offset 20)
-		 *   2. Write new eth header at offset 0
-		 *   3. Write outer IP header at offset 14
-		 *   ... but that would overlap with old eth at offset 20.
-		 *
-		 * Better approach: adjust_head gives us 20 extra bytes at front.
-		 * Layout after adjust_head(-20):
-		 *   new_data[0..13]  = garbage (new space for eth)
-		 *   new_data[14..19] = garbage (new space, part of eth+ip)
-		 *   new_data[20..33] = old eth header (14 bytes)
-		 *   new_data[34..53] = old IP header (the inner IP)
-		 *   new_data[54..]   = old L4 payload
-		 *
-		 * We want:
-		 *   new_data[0..13]  = new eth header
-		 *   new_data[14..33] = outer IP header (20 bytes)
-		 *   new_data[34..53] = inner IP header (the original)
-		 *   new_data[54..]   = L4 payload
-		 *
-		 * So we copy old eth (at +20) to position 0, then write
-		 * outer IP at position 14. The inner IP at 34 is untouched.
-		 */
-
 		/* Read old eth header from offset +20 (sizeof(iphdr)) */
 		struct ethhdr *old_eth = (struct ethhdr *)((void *)new_eth + sizeof(struct iphdr));
 		if ((void *)(old_eth + 1) > data_end)
 			return XDP_PASS;
-
-		/* Copy eth type from old header (should be ETH_P_IP) */
-		__be16 old_h_proto = old_eth->h_proto;
 
 		/* Build new Ethernet header */
 		memcpy(new_eth->h_dest,   route->host_mac, ETH_ALEN);
@@ -310,45 +383,6 @@ int xdp_eth_ingress_func(struct xdp_md *ctx)
 	/* Only handle IPIP tunneled packets */
 	if (ip_proto != IPPROTO_IPIP)
 		return XDP_PASS;
-
-	/* nh.pos now points to the inner IP header.
-	 * We need to strip the outer IP header (20 bytes) and reconstruct
-	 * an Ethernet header for the inner packet.
-	 *
-	 * Strategy: use bpf_xdp_adjust_head(+20) to remove outer IP,
-	 * then the old Ethernet header is effectively replaced by the
-	 * inner IP. We actually need to:
-	 *
-	 * Current layout:
-	 *   [eth 14][outer IP 20][inner IP 20][L4...]
-	 *
-	 * After adjust_head(+20):
-	 *   data starts at what was [outer IP + 6], which is:
-	 *   [last 6 bytes of outer IP][inner IP 20][L4...]
-	 *   We have 14 bytes of space that we can use as new eth header
-	 *   (the head moved forward by 20, but we still have 14 bytes
-	 *    before inner IP).
-	 *
-	 * Actually, the cleanest approach:
-	 *   adjust_head(+(outer_ip_hdr_len)) to eat the outer IP header.
-	 *   But that leaves [eth header][inner IP][L4...], which is what
-	 *   we want! Except the eth header still has old MACs/proto.
-	 *
-	 * Wait — adjust_head moves data pointer forward. If outer IHL=5:
-	 *   Before: data → [eth:14][outerIP:20][innerIP:20][L4]
-	 *   adjust_head(+20): data → [eth bytes 20..33 = last 8 of outerIP + ...
-	 *
-	 * That's wrong. Let me think again.
-	 *
-	 * Better approach: We know the inner IP starts at nh.pos.
-	 * The offset from data to inner IP = 14 (eth) + outer_ihl*4.
-	 * We want to strip outer IP but keep ethernet-sized space.
-	 *
-	 * So: adjust_head by (outer_ihl * 4) bytes forward.
-	 * After: data points to (old_data + 20).
-	 * Layout: [14 bytes: tail of old eth + start of outer IP][inner IP][L4]
-	 * We overwrite those 14 bytes as a new eth header.
-	 */
 
 	int outer_hdr_len = outer_iph->ihl * 4;
 	if (outer_hdr_len < 20 || outer_hdr_len > 60)
