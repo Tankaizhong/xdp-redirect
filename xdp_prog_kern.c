@@ -241,7 +241,7 @@ int xdp_pod_egress_func(struct xdp_md *ctx)
 	struct iphdr  *iph;
 	int eth_type, ip_proto;
 	__u32 dst_ip;
-
+	// bpf_printk("receive");
 	/* Parse Ethernet header */
 	eth_type = parse_ethhdr(&nh, data_end, &eth);
 	if (eth_type < 0)
@@ -249,7 +249,9 @@ int xdp_pod_egress_func(struct xdp_md *ctx)
 
 	/* ── ARP 代答：在 XDP 层直接回复，不依赖内核 proxy_arp ────────── */
 	if (eth_type == bpf_htons(ETH_P_ARP))
-		return handle_arp(ctx);
+		// return handle_arp(ctx);
+		// bpf_printk("arp");
+		return XDP_PASS;
 
 	/* ── 以下处理 IPv4 数据包 ─────────────────────────────────────── */
 	if (eth_type != bpf_htons(ETH_P_IP))
@@ -263,20 +265,31 @@ int xdp_pod_egress_func(struct xdp_md *ctx)
 
 	/* Look up routing_map to find which host owns the destination pod */
 	struct route_entry *route = bpf_map_lookup_elem(&routing_map, &dst_ip);
-	if (!route)
+	if (!route) {
+		bpf_printk("egress: no route for dst %x proto %d, PASS\n",
+			   bpf_ntohl(dst_ip), ip_proto);
 		return XDP_PASS; /* unknown destination, let kernel handle */
+	}
 
 	/* Get local host config */
 	__u32 zero = 0;
 	struct host_info *local = bpf_map_lookup_elem(&host_config, &zero);
-	if (!local)
+	if (!local) {
+		bpf_printk("egress: host_config missing, PASS\n");
 		return XDP_PASS;
+	}
 
 	if (route->host_ip == local->host_ip) {
 		/* ── Local delivery: same host ────────────────────────────── */
 		struct delivery_entry *target = bpf_map_lookup_elem(&delivery_map, &dst_ip);
-		if (!target)
+		if (!target) {
+			bpf_printk("egress: local dst %x not in delivery_map, PASS\n",
+				   bpf_ntohl(dst_ip));
 			return XDP_PASS;
+		}
+
+		bpf_printk("egress: local dst %x -> ifindex %d\n",
+			   bpf_ntohl(dst_ip), target->ifindex);
 
 		/* Rewrite L2: dst=pod_mac, src=local_eth_mac */
 		memcpy(eth->h_dest,   target->pod_mac,  ETH_ALEN);
@@ -285,14 +298,19 @@ int xdp_pod_egress_func(struct xdp_md *ctx)
 		/* Fix checksums (handle CHECKSUM_PARTIAL) */
 		data     = (void *)(long)ctx->data;
 		data_end = (void *)(long)ctx->data_end;
-		if (fix_inner_checksums(data, data_end) < 0)
+		if (fix_inner_checksums(data, data_end) < 0) {
+			bpf_printk("egress: local fix_csum failed, PASS\n");
 			return XDP_PASS;
+		}
 
 		/* Redirect to target pod's veth via DEVMAP */
 		return bpf_redirect_map(&tx_ports, target->ifindex, XDP_PASS);
 
 	} else {
 		/* ── Remote delivery: IPIP encapsulation ─────────────────── */
+
+		bpf_printk("egress: IPIP dst %x -> host %x\n",
+			   bpf_ntohl(dst_ip), bpf_ntohl(route->host_ip));
 
 		/* Save inner packet length for outer IP tot_len */
 		__u16 inner_len = bpf_ntohs(iph->tot_len);
@@ -301,12 +319,16 @@ int xdp_pod_egress_func(struct xdp_md *ctx)
 		 * still parse the inner L4 headers easily) */
 		data     = (void *)(long)ctx->data;
 		data_end = (void *)(long)ctx->data_end;
-		if (fix_inner_checksums(data, data_end) < 0)
+		if (fix_inner_checksums(data, data_end) < 0) {
+			bpf_printk("egress: IPIP fix_csum failed, PASS\n");
 			return XDP_PASS;
+		}
 
 		/* Prepend space for outer IP header (20 bytes) */
-		if (bpf_xdp_adjust_head(ctx, -(int)sizeof(struct iphdr)))
+		if (bpf_xdp_adjust_head(ctx, -(int)sizeof(struct iphdr))) {
+			bpf_printk("egress: adjust_head failed, PASS\n");
 			return XDP_PASS;
+		}
 
 		/* Re-evaluate data pointers after adjust_head */
 		data     = (void *)(long)ctx->data;
@@ -348,6 +370,8 @@ int xdp_pod_egress_func(struct xdp_md *ctx)
 		outer_iph->check = compute_iph_csum(outer_iph);
 
 		/* Redirect to eth interface */
+		bpf_printk("egress: IPIP redirect to eth ifindex %d\n",
+			   local->eth_ifindex);
 		return bpf_redirect_map(&tx_ports, local->eth_ifindex, XDP_PASS);
 	}
 }
@@ -381,8 +405,10 @@ int xdp_eth_ingress_func(struct xdp_md *ctx)
 		return XDP_PASS;
 
 	/* Only handle IPIP tunneled packets */
-	if (ip_proto != IPPROTO_IPIP)
+	if (ip_proto != IPPROTO_IPIP) {
+		bpf_printk("ingress: proto %d (not IPIP), PASS\n", ip_proto);
 		return XDP_PASS;
+	}
 
 	int outer_hdr_len = outer_iph->ihl * 4;
 	if (outer_hdr_len < 20 || outer_hdr_len > 60)
@@ -395,29 +421,33 @@ int xdp_eth_ingress_func(struct xdp_md *ctx)
 
 	__u32 inner_dst_ip = inner_iph->daddr;
 
+	bpf_printk("ingress: IPIP inner dst %x\n", bpf_ntohl(inner_dst_ip));
+
 	/* Look up delivery target for inner dst IP */
 	struct delivery_entry *target = bpf_map_lookup_elem(&delivery_map, &inner_dst_ip);
-	if (!target)
+	if (!target) {
+		bpf_printk("ingress: inner dst %x not in delivery_map, PASS\n",
+			   bpf_ntohl(inner_dst_ip));
 		return XDP_PASS; /* unknown pod, let kernel handle */
+	}
 
 	/* Get local host config for src MAC */
 	__u32 zero = 0;
 	struct host_info *local = bpf_map_lookup_elem(&host_config, &zero);
-	if (!local)
+	if (!local) {
+		bpf_printk("ingress: host_config missing, PASS\n");
 		return XDP_PASS;
+	}
 
-	/* Strip outer IP header */
+	/* Strip outer IP header.
+	 * adjust_head(+outer_hdr_len) moves data forward by outer_hdr_len bytes.
+	 * Since the packet is [eth(14)][outer_IP(outer_hdr_len)][inner_IP...],
+	 * data was at byte 0 (eth start). After +outer_hdr_len, data lands at
+	 * byte outer_hdr_len, which is exactly sizeof(ethhdr) bytes BEFORE inner_IP
+	 * (inner_IP starts at 14+outer_hdr_len). We will write the new eth header
+	 * at data, overwriting the tail of the outer IP header — that's fine.
+	 */
 	if (bpf_xdp_adjust_head(ctx, outer_hdr_len))
-		return XDP_PASS;
-
-	/* Re-evaluate data pointers */
-	data     = (void *)(long)ctx->data;
-	data_end = (void *)(long)ctx->data_end;
-
-	/* Now data points to where outer IP used to end = inner IP start.
-	 * But we need an Ethernet header before the inner IP.
-	 * So we adjust back by ETH_HLEN (14 bytes). */
-	if (bpf_xdp_adjust_head(ctx, -(int)(sizeof(struct ethhdr))))
 		return XDP_PASS;
 
 	data     = (void *)(long)ctx->data;
@@ -433,10 +463,14 @@ int xdp_eth_ingress_func(struct xdp_md *ctx)
 	new_eth->h_proto = bpf_htons(ETH_P_IP);
 
 	/* Fix inner checksums */
-	if (fix_inner_checksums(data, data_end) < 0)
+	if (fix_inner_checksums(data, data_end) < 0) {
+		bpf_printk("ingress: fix_csum failed, PASS\n");
 		return XDP_PASS;
+	}
 
 	/* Deliver to local pod via DEVMAP */
+	bpf_printk("ingress: deliver inner dst %x -> ifindex %d\n",
+		   bpf_ntohl(inner_dst_ip), target->ifindex);
 	return bpf_redirect_map(&tx_ports, target->ifindex, XDP_PASS);
 }
 
