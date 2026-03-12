@@ -57,7 +57,11 @@ VM1 (192.168.1.1)                         VM2 (192.168.1.2)
       └──────── 物理网络 / 交换机 ──────────────┘
 ```
 
-每个 Pod 是一个 Docker 容器，连接到专用 bridge 网络 `xdp-overlay`（子网 `10.244.0.0/16`）并指定固定 IP。Docker 自动创建并管理 veth pair，`add_pod.sh` 通过读取容器的 `iflink` 找到宿主机侧 veth，然后在其上挂载 `xdp_pod_egress` 程序。容器状态（veth 名、pod IP）保存到 `/var/run/xdp-overlay/<pod_name>.env`，供 `del_pod.sh` 和 `teardown_host.sh` 使用。
+每个 Pod 是一个 Docker 容器，连接到本节点专属的 bridge 网络 `xdp-overlay`。**每台宿主机分配独立的 /24 子网**（VM1 用 `10.244.1.0/24`，VM2 用 `10.244.2.0/24`），网关为该段第一个地址（`.1`）。
+
+跨宿主机的目标 IP 落在不同 /24，Pod 内核路由表将其发往本地网关，不会触发跨宿主机 ARP。ARP 全部由本地 Docker bridge 处理，XDP 程序只专注 IP 层的转发决策。
+
+Docker 自动创建并管理 veth pair，`add_pod.sh` 通过读取容器的 `iflink` 找到宿主机侧 veth，然后在其上挂载 `xdp_pod_egress` 程序。容器状态（veth 名、pod IP）保存到 `/var/run/xdp-overlay/<pod_name>.env`，供 `del_pod.sh` 和 `teardown_host.sh` 使用。
 
 ---
 
@@ -76,7 +80,7 @@ VM1 (192.168.1.1)                         VM2 (192.168.1.2)
 | XDP/Map 逻辑 | 完全相同 | **完全相同**，零改动 |
 | C 代码改动 | — | **无**（内核 BPF + 用户态工具均不变） |
 
-核心原理：Docker 容器本质上也是 Linux netns + cgroup。`--network=none` 关闭 Docker 自带的网络栈，我们接管后手动配置 veth + XDP，效果与裸 netns 完全一致。
+核心原理：Docker 容器本质上也是 Linux netns + cgroup。使用 Docker bridge 网络（`xdp-overlay`）提供 veth pair 和 IP 分配，XDP 程序挂载在宿主机侧 veth 上拦截并转发流量，效果与裸 netns 完全一致。
 
 ---
 
@@ -135,49 +139,54 @@ struct host_info {
 
 | Section | 挂载位置 | 功能 |
 |---------|----------|------|
-| `xdp_pod_egress` | 各 pod 的 host 侧 veth | 处理 pod 发出的包：查 routing_map 判断本地 redirect 或 IPIP 封装 |
+| `xdp_pod_egress` | 各 pod 的 host 侧 veth | 处理 pod 发出的包：ARP 直接 XDP_PASS 交 bridge 处理；IPv4 查 routing_map 判断本地 redirect 或 IPIP 封装 |
 | `xdp_eth_ingress` | 物理网卡（如 ens33） | 接收物理网络的 IPIP 包：解封后查 delivery_map 投递到本地 pod |
-| `xdp_pass` | 各 pod 的容器侧 veth | 无操作，仅满足 veth `ndo_xdp_xmit` 要求 peer 必须有 native XDP 程序 |
 
 ---
 
 ## 数据包转发路径
 
-### 同宿主机（pod1 → pod2，均在 VM1）
+### 同宿主机（pod1 → pod2，均在 VM1，同属 10.244.1.0/24）
+
+pod1 和 pod2 在同一个 /24，内核直接 ARP 对方，Docker bridge 广播并由 pod2 回复。
 
 ```
-pod1 容器发送 ICMP echo request
+pod1 容器发送 ICMP echo request（dst_ip=10.244.1.11，dst_mac=POD2_MAC）
   │
-  ▼ pod1-ns TX → pod1-host RX
+  ▼ pod1 eth0 TX → pod1-host veth RX
   │
   ▼ XDP(xdp_pod_egress) 执行：
-       1. 解析 dst_ip = 10.244.1.11
-       2. routing_map[10.244.1.11] → host_ip=192.168.1.1（本机）
-       3. delivery_map[10.244.1.11] → ifindex=pod2-host, mac=POD2_MAC
-       4. 改写 eth: dst=POD2_MAC, src=ETH_MAC
-       5. fix_checksums()
-       6. bpf_redirect_map(&tx_ports, pod2-host_ifindex, XDP_PASS)
+       1. 非 ARP → 继续处理 IPv4
+       2. 解析 dst_ip = 10.244.1.11
+       3. routing_map[10.244.1.11] → host_ip=192.168.1.1（本机）
+       4. delivery_map[10.244.1.11] → ifindex=pod2-host, mac=POD2_MAC
+       5. 改写 eth: dst=POD2_MAC, src=ETH_MAC
+       6. fix_checksums()
+       7. bpf_redirect_map(&tx_ports, pod2-host_ifindex, XDP_PASS)
   │
-  ▼ pod2-host TX → pod2-ns RX → pod2 容器内核协议栈收到
+  ▼ pod2-host TX → pod2 eth0 RX → pod2 容器收到
 ```
 
 ### 跨宿主机（pod1@VM1 → pod3@VM2）
 
+pod3（10.244.2.10）不在 pod1 的 /24（10.244.1.0/24），pod1 路由至本地网关 10.244.1.1（bridge），无需跨宿主机 ARP。
+
 **发送侧（VM1）：**
 
 ```
-pod1 容器发送
+pod1 容器发送（dst_ip=10.244.2.10，dst_mac=BRIDGE_GW_MAC）
   │
-  ▼ pod1-ns TX → pod1-host RX
+  ▼ pod1 eth0 TX → pod1-host veth RX
   │
   ▼ XDP(xdp_pod_egress) 执行：
-       1. 解析 dst_ip = 10.244.2.10
-       2. routing_map[10.244.2.10] → host_ip=192.168.1.2, mac=VM2_ETH_MAC
-       3. host_ip ≠ 本机 → IPIP 封装路径
-       4. fix_checksums()（修复内层校验和）
-       5. bpf_xdp_adjust_head(-20) 扩展空间
-       6. 构建 outer eth + outer IP (proto=IPIP)
-       7. bpf_redirect_map(&tx_ports, ens33_ifindex, XDP_PASS)
+       1. 非 ARP → 继续处理 IPv4
+       2. 解析 dst_ip = 10.244.2.10
+       3. routing_map[10.244.2.10] → host_ip=192.168.1.2, mac=VM2_ETH_MAC
+       4. host_ip ≠ 本机 → IPIP 封装路径
+       5. fix_checksums()（修复内层校验和）
+       6. bpf_xdp_adjust_head(-20) 扩展空间
+       7. 构建 outer eth + outer IP (proto=IPIP)
+       8. bpf_redirect_map(&tx_ports, ens33_ifindex, XDP_PASS)
   │
   ▼ ens33 TX → 物理网络 → VM2 ens33 RX
 ```
@@ -217,10 +226,12 @@ setup_host.sh 初始化流程：
        → pin 到 /sys/fs/bpf/xdp_ipip_*
   2. ip link set dev ens33 xdpgeneric pinned ...
        → 挂载 xdp_eth_ingress（generic 模式兼容 VM 网卡）
+  3. docker network create --subnet=<pod_subnet> --gateway=<pod_gw> xdp-overlay
+       → 创建本节点专属 /24 bridge 网络
 
 add_pod.sh 添加 Docker pod 流程：
   1. docker run --network=xdp-overlay --ip=<pod_ip> → 启动容器
-       → Docker 自动创建 veth pair
+       → Docker 自动创建 veth pair，pod 获得 /24 内 IP 和对应网关路由
   2. 读取容器 iflink → 找到宿主机侧 veth 名
   3. 保存状态到 /var/run/xdp-overlay/<pod>.env
   4. ip link set dev <veth-host> xdp pinned ...
@@ -235,7 +246,7 @@ add_pod.sh 添加 Docker pod 流程：
 | 组件 | 最低版本 |
 |------|----------|
 | Linux 内核 | 5.9+ |
-| Docker | 20.10+（需要 `--network=none` 和 `--privileged`） |
+| Docker | 20.10+（需要 bridge 网络和 `--privileged`） |
 | clang / llvm | 10+ |
 | libbpf-dev | 0.5+ |
 | iproute2 | 任意现代版本 |
@@ -274,10 +285,10 @@ make clean && make
 
 ```bash
 # VM1
-sudo bash scripts/setup_host.sh 192.168.1.1 ens33
+sudo bash scripts/setup_host.sh 192.168.1.1 ens33 10.244.1.0/24
 
 # VM2
-sudo bash scripts/setup_host.sh 192.168.1.2 ens33
+sudo bash scripts/setup_host.sh 192.168.1.2 ens33 10.244.2.0/24
 ```
 
 `setup_host.sh` 会自动构建 `xdp-pod` Docker 镜像。
@@ -294,7 +305,7 @@ sudo bash scripts/add_pod.sh pod3 10.244.2.10
 sudo bash scripts/add_pod.sh pod4 10.244.2.11
 ```
 
-每个 `add_pod.sh` 会自动完成：启动容器 → 链接 netns → 创建 veth → 配置 IP → 加载 XDP → 更新 maps。
+每个 `add_pod.sh` 会自动完成：启动容器（Docker 自动建 veth + 分配 IP）→ 查找宿主机侧 veth → 加载 XDP → 更新 maps。
 
 也可以指定自定义 Docker 镜像：
 
@@ -321,12 +332,9 @@ sudo bash scripts/add_remote_route.sh 10.244.1.11 192.168.1.1 $VM1_MAC
 ### 第五步：验证
 
 ```bash
-# 通过 docker exec 测试（推荐）
+# 通过 docker exec 测试
 docker exec xdp_pod1 ping -c3 10.244.1.11      # 同宿主机
 docker exec xdp_pod1 ping -c3 10.244.2.10      # 跨宿主机
-
-# 或通过 ip netns exec 测试
-sudo ip netns exec ns_pod1 ping -c3 10.244.2.10
 
 # TCP 测试
 docker exec -d xdp_pod3 nc -l -p 8080
@@ -364,9 +372,9 @@ sudo ./xdp_prog_user route del 10.244.1.20
 ### 新增宿主机
 
 ```bash
-# 1. 编译 + 初始化
+# 1. 编译 + 初始化（分配新的 /24 子网）
 make clean && make
-sudo bash scripts/setup_host.sh 192.168.1.3 ens33
+sudo bash scripts/setup_host.sh 192.168.1.3 ens33 10.244.3.0/24
 
 # 2. 添加 pod
 sudo bash scripts/add_pod.sh pod5 10.244.3.10
@@ -442,23 +450,18 @@ sudo ./xdp_prog_user dump
 
 | 问题 | 选择 | 原因 |
 |------|------|------|
-| Pod 实现 | Docker `--network=none` | 完整容器环境，可运行任意服务；netns 原理不变 |
+| Pod 实现 | Docker bridge 网络（`xdp-overlay`） | 完整容器环境；Docker 自动管理 veth pair |
+| Pod 子网划分 | 每节点独立 /24 | 跨节点 IP 不同子网，Pod 路由走本地网关，彻底消除跨宿主机 ARP |
+| ARP 处理 | XDP_PASS，交 bridge 内核处理 | 同子网 ARP 由 bridge 自然处理；跨节点不触发 ARP |
 | 隧道协议 | IPIP（proto=4） | 最简单的 L3-in-L3 封装 |
 | `bpf_redirect_map` | DEVMAP 路径 | veth 的 `ndo_xdp_xmit` 要求 |
 | 转发决策 | 纯 map 查表 | 动态增删，无需重编译 |
-| namespace 侧 XDP | `xdp_pass` | `veth_xdp_xmit` 要求 peer 有 native XDP |
 | Checksum | XDP 内全量重算 | 处理 `CHECKSUM_PARTIAL` |
 | Map 共享 | `bpf_object__load` + pin | 所有程序共享转发表 |
 
 ---
 
 ## 已知问题与解决方案
-
-### Docker 容器无法加载 XDP 对象
-
-**现象**：`ip link set xdp obj` 在容器 netns 中失败。
-
-**解决**：确保 `xdp_prog_kern.o` 路径在宿主机上可访问。脚本通过 `ip netns exec` 从宿主机执行加载，而非在容器内执行。
 
 ### veth TX Checksum Offload 导致 TCP 不通
 
@@ -480,13 +483,13 @@ sudo ./xdp_prog_user dump
 
 ### MTU 问题
 
-IPIP 封装增加 20 字节。建议在 Pod 内或通过 Docker 调整 MTU：
+IPIP 封装增加 20 字节。`setup_host.sh` 已将物理网卡 MTU 调整为 1480。如需调整 pod 内 MTU：
 
 ```bash
 # 在 pod 容器内
-docker exec xdp_pod1 ip link set dev pod1-ns mtu 1480
+docker exec xdp_pod1 ip link set dev eth0 mtu 1460
 
-# 或增大物理网卡 MTU
+# 或增大物理网卡 MTU（允许更大的内层包）
 ip link set dev ens33 mtu 1520
 ```
 
@@ -524,8 +527,8 @@ docker rmi xdp-pod
 ├── README.md                   # 本文件
 ├── Dockerfile.pod              # Pod 容器镜像（alpine + 网络工具）
 │
-├── xdp_prog_kern.c            # XDP 内核程序（三个 SEC，无改动）
-├── xdp_prog_user.c            # 用户态工具（libbpf，无改动）
+├── xdp_prog_kern.c            # XDP 内核程序（xdp_pod_egress + xdp_eth_ingress）
+├── xdp_prog_user.c            # 用户态工具（libbpf）
 │
 ├── common/
 │   ├── xdp_maps.h             # eBPF Map 定义
@@ -544,14 +547,15 @@ docker rmi xdp-pod
 
 ```
 初始部署：
-  scripts/setup_host.sh
+  scripts/setup_host.sh <host_ip> <eth_iface> <pod_subnet>
     ├─ docker build -t xdp-pod (构建 Pod 镜像)
     ├─ xdp_prog_user load (加载 BPF 程序)
-    └─ ip link set xdp pinned (挂载 xdp_eth_ingress)
+    ├─ ip link set xdpgeneric pinned (挂载 xdp_eth_ingress)
+    └─ docker network create --subnet=<pod_subnet> xdp-overlay (创建本节点专属 /24)
        │
        ▼（每个 pod 执行一次）
-  scripts/add_pod.sh
-    ├─ docker run --network=xdp-overlay --ip (启动容器，Docker 自动建 veth)
+  scripts/add_pod.sh <pod_name> <pod_ip>
+    ├─ docker run --network=xdp-overlay --ip (启动容器，Docker 自动建 veth + 路由)
     ├─ iflink 查找宿主机侧 veth 名
     ├─ 保存状态到 /var/run/xdp-overlay/<pod>.env
     ├─ ip link set xdp pinned (挂载 xdp_pod_egress)
