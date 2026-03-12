@@ -23,12 +23,13 @@ STATE_DIR="/var/run/xdp-overlay"
 
 CONTAINER_NAME="xdp_${POD_NAME}"
 DOCKER_NET="xdp-overlay"
-DOCKER_SUBNET="10.244.0.0/16"
 
 # ── 前置检查 ──────────────────────────────────────────────────────────────────
 
-[ ! -f "${PIN_PFX}routing_map" ]  && echo "错误: maps 不存在，请先运行 setup_host.sh" && exit 1
+[ ! -f "${PIN_PFX}routing_map" ]     && echo "错误: maps 不存在，请先运行 setup_host.sh" && exit 1
 [ ! -f "${PIN_PFX}pod_egress_prog" ] && echo "错误: pod_egress_prog 不存在，请先运行 setup_host.sh" && exit 1
+docker network inspect "$DOCKER_NET" &>/dev/null \
+    || { echo "错误: Docker 网络 xdp-overlay 不存在，请先运行 setup_host.sh"; exit 1; }
 
 # 读取本机 IP 和 MAC
 HOST_CFG=$("$XDP_USER" host get 2>/dev/null || true)
@@ -36,14 +37,7 @@ HOST_IP=$(echo "$HOST_CFG" | awk '{print $1}')
 ETH_MAC=$(echo "$HOST_CFG" | awk '{print $2}')
 [ -z "$HOST_IP" ] || [ "$HOST_IP" = "0.0.0.0" ] && echo "错误: 请先运行 setup_host.sh" && exit 1
 
-# ── 1. 确保 Docker 网络存在（使用 Docker 默认配置）────────────────────────────
-
-if ! docker network inspect "$DOCKER_NET" &>/dev/null; then
-    docker network create --subnet="$DOCKER_SUBNET" "$DOCKER_NET"
-    echo "已创建网络 $DOCKER_NET"
-fi
-
-# ── 2. 清理旧容器 ──────────────────────────────────────────────────────────────
+# ── 1. 清理旧容器（如已存在）─────────────────────────────────────────────────
 
 if docker ps -a --format '{{.Names}}' | grep -qw "$CONTAINER_NAME"; then
     OLD_STATE="${STATE_DIR}/${POD_NAME}.env"

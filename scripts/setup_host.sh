@@ -5,30 +5,38 @@
 # 在每台 VM 上运行一次，完成：
 #   1. 检查 Docker 环境
 #   2. 构建 pod 镜像
-#   3. 挂载 bpffs、创建 pin 目录
+#   3. 挂载 bpffs
 #   4. 加载 BPF 程序，pin 所有 maps 和程序到 /sys/fs/bpf/xdp_ipip_*
 #   5. 将 xdp_eth_ingress 挂载到物理网卡
 #   6. 设置 host_config（本机 IP、eth 接口信息）
 #   7. 注册 eth 接口到 tx_ports DEVMAP
+#   8. 创建本节点专属 Docker bridge 网络（每节点独立 /24）
 #
 # 用法：
-#   sudo bash setup_host.sh <host_ip> <eth_interface>
+#   sudo bash setup_host.sh <host_ip> <eth_interface> <pod_subnet>
 #
 # 示例：
-#   VM1: sudo bash setup_host.sh 192.168.1.1 ens33
-#   VM2: sudo bash setup_host.sh 192.168.1.2 ens33
+#   VM1: sudo bash setup_host.sh 192.168.1.1 ens33 10.244.1.0/24
+#   VM2: sudo bash setup_host.sh 192.168.1.2 ens33 10.244.2.0/24
+#
+# pod_subnet 约定：每台 VM 使用独立 /24，网关自动取该段第一个地址（.1）。
+# 跨宿主机的 pod IP 落在不同 /24，容器通过默认路由发往本地网关，
+# xdp_pod_egress 识别后做 IPIP 封装，无需跨宿主机 ARP。
 # ============================================================================
 
 set -e
 
-if [ $# -lt 2 ]; then
-    echo "用法: $0 <host_ip> <eth_interface>"
-    echo "示例: $0 192.168.1.1 ens33"
+if [ $# -lt 3 ]; then
+    echo "用法: $0 <host_ip> <eth_interface> <pod_subnet>"
+    echo "示例: $0 192.168.1.1 ens33 10.244.1.0/24"
     exit 1
 fi
 
 HOST_IP="$1"
 ETH_DEV="$2"
+POD_SUBNET="$3"
+# 网关取 /24 第一个地址（.1）：10.244.1.0/24 → 10.244.1.1
+POD_GW=$(echo "$POD_SUBNET" | cut -d/ -f1 | awk -F. '{print $1"."$2"."$3".1"}')
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -70,6 +78,7 @@ echo "  XDP IPIP Overlay 宿主机初始化 (Docker)"
 echo "=========================================="
 echo "  宿主机 IP:  $HOST_IP"
 echo "  物理网卡:   $ETH_DEV (ifindex=$ETH_IDX, mac=$ETH_MAC)"
+echo "  Pod 子网:   $POD_SUBNET (网关: $POD_GW)"
 echo ""
 
 # ── 1. 构建 Pod Docker 镜像 ──────────────────────────────────────────────
@@ -129,6 +138,28 @@ echo "=== 配置宿主机信息 ==="
 "$XDP_USER" host set "$HOST_IP" "$ETH_DEV" "$ETH_MAC"
 "$XDP_USER" txport add "$ETH_DEV"
 
+# ── 7. 创建本节点 Docker bridge 网络 ─────────────────────────────────────────
+
+echo "=== 创建 Docker 网络 ==="
+if docker network inspect xdp-overlay &>/dev/null; then
+    EXISTING_SUBNET=$(docker network inspect xdp-overlay \
+        --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}')
+    if [ "$EXISTING_SUBNET" = "$POD_SUBNET" ]; then
+        echo "  xdp-overlay ($POD_SUBNET) 已存在，跳过"
+    else
+        echo "  警告: xdp-overlay 已存在但子网不同 ($EXISTING_SUBNET ≠ $POD_SUBNET)"
+        echo "  请先运行 teardown_host.sh 清理后重新初始化"
+        exit 1
+    fi
+else
+    docker network create \
+        --driver bridge \
+        --subnet="$POD_SUBNET" \
+        --gateway="$POD_GW" \
+        xdp-overlay
+    echo "  已创建 xdp-overlay: $POD_SUBNET (gw: $POD_GW)"
+fi
+
 # ── 完成 ─────────────────────────────────────────────────────────────────────
 
 echo ""
@@ -138,7 +169,7 @@ echo "=========================================="
 echo ""
 echo "下一步："
 echo "  1. 添加本地 pod（Docker 容器）:"
-echo "     sudo bash scripts/add_pod.sh <pod_name> <pod_ip>"
+echo "     sudo bash scripts/add_pod.sh <pod_name> <pod_ip_in_${POD_SUBNET}>"
 echo ""
 echo "  2. 添加远程 pod 路由（在本机执行）:"
 echo "     sudo bash scripts/add_remote_route.sh <pod_ip> <remote_host_ip> <remote_host_mac>"
