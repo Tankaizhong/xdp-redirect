@@ -148,7 +148,7 @@ int xdp_pod_egress_func(struct xdp_md *ctx)
 	if (eth_type < 0)
 		return XDP_PASS;
 
-	/* ARP 由 bridge 内核处理（每节点独立 /24，跨节点走默认路由不触发跨宿主机 ARP） */
+	/* ARP 由 bridge 内核处理 */
 	if (eth_type == bpf_htons(ETH_P_ARP))
 		return XDP_PASS;
 
