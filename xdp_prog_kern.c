@@ -249,9 +249,10 @@ int xdp_pod_egress_func(struct xdp_md *ctx)
 
 	/* ── ARP 代答：在 XDP 层直接回复，不依赖内核 proxy_arp ────────── */
 	if (eth_type == bpf_htons(ETH_P_ARP))
-		// return handle_arp(ctx);
-		// bpf_printk("arp");
-		return XDP_PASS;
+		bpf_printk("arp");
+		return handle_arp(ctx);
+
+		// return XDP_PASS;
 
 	/* ── 以下处理 IPv4 数据包 ─────────────────────────────────────── */
 	if (eth_type != bpf_htons(ETH_P_IP))
