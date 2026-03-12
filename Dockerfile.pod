@@ -1,0 +1,19 @@
+# Dockerfile.pod – 最小化 pod 镜像，用于模拟容器网络
+#
+# 构建: docker build -t xdp-pod -f Dockerfile.pod .
+FROM alpine:3.19
+
+RUN apk update
+
+RUN apk add --no-cache \
+    iproute2 \
+    iputils \
+    tcpdump \
+    busybox-extras \
+    curl \
+    iperf3 \
+    nmap-ncat \
+    bash
+
+# 默认保持容器运行
+CMD ["sleep", "infinity"]

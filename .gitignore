@@ -1,6 +1,7 @@
 # Build artifacts
 *.o
 xdp_prog_user
+xdp-loader
 
 # IDE / tooling
 .claude/
