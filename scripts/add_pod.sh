@@ -77,8 +77,8 @@ EOF
 
 # ── 6. 加载 XDP 程序 ───────────────────────────────────────────────────────────
 
-ip link set dev "$VETH_HOST" xdp pinned "${PIN_PFX}pod_egress_prog"
-# ip link set dev "$VETH_HOST" xdpgeneric pinned "${PIN_PFX}pod_egress_prog"
+# ip link set dev "$VETH_HOST" xdp pinned "${PIN_PFX}pod_egress_prog"
+ip link set dev "$VETH_HOST" xdpgeneric pinned "${PIN_PFX}pod_egress_prog"
 echo "xdp_pod_egress → $VETH_HOST"
 
 # ── 7. 更新 eBPF maps ──────────────────────────────────────────────────────────

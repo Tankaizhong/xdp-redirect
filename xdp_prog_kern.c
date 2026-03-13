@@ -167,6 +167,11 @@ int xdp_pod_egress_func(struct xdp_md *ctx)
 	if (!route) {
 		bpf_printk("egress: no route for dst %x proto %d, PASS\n",
 			   bpf_ntohl(dst_ip), ip_proto);
+		/* Fix CHECKSUM_PARTIAL before passing to kernel: veth+XDP may
+		 * not preserve ip_summed, so TX offload won't complete it. */
+		data     = (void *)(long)ctx->data;
+		data_end = (void *)(long)ctx->data_end;
+		fix_inner_checksums(data, data_end);
 		return XDP_PASS; /* unknown destination, let kernel handle */
 	}
 
@@ -305,7 +310,7 @@ int xdp_eth_ingress_func(struct xdp_md *ctx)
 
 	/* Only handle IPIP tunneled packets */
 	if (ip_proto != IPPROTO_IPIP) {
-		bpf_printk("ingress: proto %d (not IPIP), PASS\n", ip_proto);
+		// bpf_printk("ingress: proto %d (not IPIP), PASS\n", ip_proto);
 		return XDP_PASS;
 	}
 
