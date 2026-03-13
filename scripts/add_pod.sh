@@ -81,6 +81,15 @@ EOF
 ip link set dev "$VETH_HOST" xdpgeneric pinned "${PIN_PFX}pod_egress_prog"
 echo "xdp_pod_egress → $VETH_HOST"
 
+# 禁用 veth 两侧的 TX checksum offload。
+# 容器发出的包内核会设置 CHECKSUM_PARTIAL（伪首部），依赖 NIC 硬件补全；
+# 但经过 XDP redirect 的包绕过了 TX offload，必须由 fix_inner_checksums 补全。
+# 这里强制两侧用软件计算，保证 XDP 看到的始终是完整校验和。
+ethtool -K "$VETH_HOST" tx off 2>/dev/null || true
+CONTAINER_PID=$(docker inspect -f '{{.State.Pid}}' "$CONTAINER_NAME")
+nsenter -n -t "$CONTAINER_PID" -- ethtool -K eth0 tx off 2>/dev/null || true
+echo "checksum offload disabled on $VETH_HOST and container eth0"
+
 # ── 7. 更新 eBPF maps ──────────────────────────────────────────────────────────
 
 POD_MAC=$(docker exec "$CONTAINER_NAME" cat /sys/class/net/eth0/address)
