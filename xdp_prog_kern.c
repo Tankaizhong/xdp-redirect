@@ -223,11 +223,11 @@ int xdp_pod_egress_func(struct xdp_md *ctx)
 		/* 在封装前修复内层校验和 (因为此时还可以方便地解析内层 L4 头) */
 		data     = (void *)(long)ctx->data;
 		data_end = (void *)(long)ctx->data_end;
-		if (fix_inner_checksums(data, data_end) < 0) {
-			bpf_printk("egress: IPIP fix_csum failed, PASS\n");
-			return XDP_PASS;
-		}
-		bpf_printk("egress: IPIP encapsulating to host %x\n", bpf_ntohl(route->host_ip));
+		// if (fix_inner_checksums(data, data_end) < 0) {
+		// 	bpf_printk("egress: IPIP fix_csum failed, PASS\n");
+		// 	return XDP_PASS;
+		// }
+		// bpf_printk("egress: IPIP encapsulating to host %x\n", bpf_ntohl(route->host_ip));
 
 		/* 预留外层 IP 头空间 (20 字节) */
 		if (bpf_xdp_adjust_head(ctx, -(int)sizeof(struct iphdr))) {
@@ -368,11 +368,11 @@ int xdp_eth_ingress_func(struct xdp_md *ctx)
 	new_eth->h_proto = bpf_htons(ETH_P_IP);
 
 	/* 修复内层校验和 */
-	if (fix_inner_checksums(data, data_end) < 0) {
-		bpf_printk("ingress: fix_csum failed, PASS\n");
-		return XDP_PASS;
-	}
-	bpf_printk("ingress: delivering to pod %x ifindex %d\n", bpf_ntohl(inner_dst_ip), target->ifindex);
+	// if (fix_inner_checksums(data, data_end) < 0) {
+	// 	bpf_printk("ingress: fix_csum failed, PASS\n");
+	// 	return XDP_PASS;
+	// }
+	// bpf_printk("ingress: delivering to pod %x ifindex %d\n", bpf_ntohl(inner_dst_ip), target->ifindex);
 
 	/* 通过 DEVMAP 交付给本地 pod */
 	// bpf_printk("ingress: deliver inner dst %pI4 -> ifindex %d\n",
