@@ -144,8 +144,9 @@ static int cmd_load(const char *obj_file)
 	static const struct { const char *func; const char *pin; } progs[] = {
 		{ "xdp_pod_egress_func",  "pod_egress_prog"  },
 		{ "xdp_eth_ingress_func", "eth_ingress_prog" },
+		{ "xdp_pass_func",        "pass_prog"        },
 	};
-	for (int i = 0; i < 2; i++) {
+	for (int i = 0; i < 3; i++) {
 		prog = bpf_object__find_program_by_name(obj, progs[i].func);
 		if (!prog) {
 			fprintf(stderr, "program %s not found\n", progs[i].func);

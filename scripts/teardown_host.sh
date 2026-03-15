@@ -1,12 +1,6 @@
 #!/bin/bash
 # ============================================================================
 # teardown_host.sh – 清理当前宿主机上的所有 XDP IPIP overlay 资源（Docker 版）
-#
-# 用法：
-#   sudo bash teardown_host.sh <eth_interface>
-#
-# 示例：
-#   sudo bash teardown_host.sh ens33
 # ============================================================================
 
 set -e
@@ -31,7 +25,8 @@ fi
 
 # 2. 清理所有 xdp_ 前缀的 Docker 容器
 echo "=== 清理 Docker 容器 ==="
-for container in $(docker ps -a --format '{{.Names}}' 2>/dev/null | grep '^xdp_'); do
+# 修复 1: 加上 `|| true` 防止 grep 找不到容器时触发 set -e 导致脚本意外退出
+for container in $(docker ps -a --format '{{.Names}}' 2>/dev/null | grep '^xdp_' || true); do
     pod_name="${container#xdp_}"
     state_file="${STATE_DIR}/${pod_name}.env"
     pod_ip=""
@@ -43,25 +38,29 @@ for container in $(docker ps -a --format '{{.Names}}' 2>/dev/null | grep '^xdp_'
         pod_ip=$(grep '^POD_IP='    "$state_file" | cut -d= -f2 || true)
     fi
 
-    # 卸载 host 侧 veth 上的 XDP（Docker 删除容器时会自动回收 veth pair）
+    # 卸载 host 侧 veth 上的 XDP
     if [ -n "$veth_host" ]; then
-        ip link set dev "$veth_host" xdp off        2>/dev/null || true
-        ip link set dev "$veth_host" xdpgeneric off 2>/dev/null || true
-        ip link set dev "$veth_host" xdpdrv off     2>/dev/null || true
-        echo "  卸载 XDP: $veth_host"
+        if ip link show dev "$veth_host" 2>/dev/null | grep -q "prog/xdp"; then
+            echo "  卸载 XDP: $veth_host"
+            ip link set dev "$veth_host" xdp off        2>/dev/null || true
+            ip link set dev "$veth_host" xdpgeneric off 2>/dev/null || true
+            ip link set dev "$veth_host" xdpdrv off     2>/dev/null || true
+        else
+            echo "  跳过卸载 (未检测到 XDP): $veth_host"
+        fi
     fi
 
-    # 清理 eBPF map 条目
+    # 清理 eBPF map 条目 (修复 2: 加入 timeout 防止 map 损坏时 C 程序死锁挂起)
     if [ -f "$XDP_USER" ] && [ -n "$pod_ip" ]; then
-        "$XDP_USER" deliver del "$pod_ip"  2>/dev/null || true
-        "$XDP_USER" route   del "$pod_ip"  2>/dev/null || true
+        timeout 5s "$XDP_USER" deliver del "$pod_ip"  2>/dev/null || true
+        timeout 5s "$XDP_USER" route   del "$pod_ip"  2>/dev/null || true
     fi
     if [ -f "$XDP_USER" ] && [ -n "$veth_host" ]; then
-        "$XDP_USER" txport  del "$veth_host" 2>/dev/null || true
+        timeout 5s "$XDP_USER" txport  del "$veth_host" 2>/dev/null || true
     fi
 
-    # 删除容器（Docker 自动回收 veth pair）
-    docker rm -f "$container" 2>/dev/null || true
+    # 删除容器 (修复 3: 加入 timeout 强制超时，防止内核 veth 异常导致 Docker daemon 卡死)
+    timeout 10s docker rm -f "$container" >/dev/null 2>&1 || echo "  [警告] 容器 $container 删除超时或失败，可能需要手动介入"
     echo "  删除容器: $container${pod_ip:+ (ip: $pod_ip)}${veth_host:+ (veth: $veth_host)}"
 
     # 删除状态文件
@@ -70,7 +69,7 @@ done
 
 # 3. 清理 eth 的 txport 条目
 if [ -f "$XDP_USER" ] && [ -n "$ETH_DEV" ]; then
-    "$XDP_USER" txport del "$ETH_DEV" 2>/dev/null || true
+    timeout 5s "$XDP_USER" txport del "$ETH_DEV" 2>/dev/null || true
 fi
 
 # 4. 清理残留状态文件
@@ -81,6 +80,7 @@ if [ -d "$STATE_DIR" ]; then
 fi
 
 # 5. 清理可能残留的 netns 链接
+# 修复 4: 防止通配符匹配不到文件时触发 set -e
 for ns in /var/run/netns/ns_*; do
     [ -e "$ns" ] || continue
     rm -f "$ns"
@@ -88,8 +88,8 @@ for ns in /var/run/netns/ns_*; do
 done
 
 # 6. 清理 Docker 网络
-if docker network inspect xdp-overlay &>/dev/null 2>&1; then
-    docker network rm xdp-overlay 2>/dev/null || true
+if docker network inspect xdp-overlay >/dev/null 2>&1; then
+    docker network rm xdp-overlay >/dev/null 2>&1 || true
     echo "  删除 Docker 网络: xdp-overlay"
 fi
 
