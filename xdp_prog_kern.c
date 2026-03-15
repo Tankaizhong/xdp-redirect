@@ -203,10 +203,10 @@ int xdp_pod_egress_func(struct xdp_md *ctx)
 		/* 修复校验和 (处理 CHECKSUM_PARTIAL) */
 		data     = (void *)(long)ctx->data;
 		data_end = (void *)(long)ctx->data_end;
-		// if (fix_inner_checksums(data, data_end) < 0) {
-		// 	bpf_printk("egress: local fix_csum failed, PASS\n");
-		// 	return XDP_PASS;
-		// }
+		if (fix_inner_checksums(data, data_end) < 0) {
+			bpf_printk("egress: local fix_csum failed, PASS\n");
+			return XDP_PASS;
+		}
 
 		/* 通过 DEVMAP 重定向到目标 pod 的 veth */
 		return bpf_redirect_map(&tx_ports, target->ifindex, XDP_PASS);
@@ -224,9 +224,10 @@ int xdp_pod_egress_func(struct xdp_md *ctx)
 		data     = (void *)(long)ctx->data;
 		data_end = (void *)(long)ctx->data_end;
 		if (fix_inner_checksums(data, data_end) < 0) {
-			// bpf_printk("egress: IPIP fix_csum failed, PASS\n");
+			bpf_printk("egress: IPIP fix_csum failed, PASS\n");
 			return XDP_PASS;
 		}
+		bpf_printk("egress: IPIP encapsulating to host %x\n", bpf_ntohl(route->host_ip));
 
 		/* 预留外层 IP 头空间 (20 字节) */
 		if (bpf_xdp_adjust_head(ctx, -(int)sizeof(struct iphdr))) {
@@ -368,9 +369,10 @@ int xdp_eth_ingress_func(struct xdp_md *ctx)
 
 	/* 修复内层校验和 */
 	if (fix_inner_checksums(data, data_end) < 0) {
-		// bpf_printk("ingress: fix_csum failed, PASS\n");
+		bpf_printk("ingress: fix_csum failed, PASS\n");
 		return XDP_PASS;
 	}
+	bpf_printk("ingress: delivering to pod %x ifindex %d\n", bpf_ntohl(inner_dst_ip), target->ifindex);
 
 	/* 通过 DEVMAP 交付给本地 pod */
 	// bpf_printk("ingress: deliver inner dst %pI4 -> ifindex %d\n",
