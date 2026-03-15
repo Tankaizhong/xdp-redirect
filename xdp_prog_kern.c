@@ -79,7 +79,7 @@ static __always_inline int fix_inner_checksums(void *data, void *data_end)
 
 	eth_type = parse_ethhdr(&nh, data_end, &eth);
 	if (eth_type < 0)
-		return 0;
+		return -1;
 
 	if (eth_type == bpf_htons(ETH_P_IP)) {
 		struct iphdr *iph;
@@ -89,10 +89,10 @@ static __always_inline int fix_inner_checksums(void *data, void *data_end)
 
 		ip_proto = parse_iphdr(&nh, data_end, &iph);
 		if (ip_proto < 0)
-			return 0;
+			return -1;
 
 		if (update_iph_checksum(iph, data_end) < 0)
-			return 0;
+			return -1;
 
 		l4_len = bpf_ntohs(iph->tot_len) - ((__u16)iph->ihl << 2);
 		l4hdr  = nh.pos;
@@ -107,14 +107,14 @@ static __always_inline int fix_inner_checksums(void *data, void *data_end)
 		} else if (ip_proto == IPPROTO_UDP) {
 			struct udphdr *udph;
 			if (parse_udphdr(&nh, data_end, &udph) < 0)
-				return 0;
+				return -1;
 			if (update_ipv4_l4_checksum(iph, &udph->check,
 						    l4hdr, l4_len, data_end) < 0)
 				return -1;
 		} else if (ip_proto == IPPROTO_ICMP) {
 			struct icmphdr *icmph;
 			if (parse_icmphdr(&nh, data_end, &icmph) < 0)
-				return 0;
+				return -1;
 			if (update_icmp_checksum(icmph, l4_len, data_end) < 0)
 				return -1;
 		}
