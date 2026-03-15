@@ -1,17 +1,17 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * xdp_prog_user.c – libbpf-based map management tool (no bpftool required).
+ * xdp_prog_user.c – 基于 libbpf 的 map 管理工具 (无需 bpftool)
  *
- * Subcommands:
- *   load    <obj_file>                          – load BPF obj, pin maps+progs
- *   route   add <pod_ip> <host_ip> <host_mac>  – add routing_map entry
- *   deliver add <pod_ip> <ifname> <pod_mac>    – add delivery_map entry
- *   host    set <host_ip> <eth_ifname> <eth_mac> – set host_config[0]
- *   host    get                                 – print host_ip and eth_mac
- *   txport  add <ifname|ifindex>               – register ifindex in tx_ports
- *   dump                                        – dump all maps
+ * 子命令:
+ *   load    <obj_file>                          – 加载 BPF 对象, pin maps 和 progs
+ *   route   add <pod_ip> <host_ip> <host_mac>  – 添加 routing_map 条目
+ *   deliver add <pod_ip> <ifname> <pod_mac>    – 添加 delivery_map 条目
+ *   host    set <host_ip> <eth_ifname> <eth_mac> – 设置 host_config[0]
+ *   host    get                                 – 打印 host_ip 和 eth_mac
+ *   txport  add <ifname|ifindex>               – 在 tx_ports 中注册 ifindex
+ *   dump                                        – 打印所有 maps
  *
- * All map operations use pinned paths under /sys/fs/bpf/xdp_ipip/
+ * 所有 map 操作使用 /sys/fs/bpf/xdp_ipip/ 下的 pinned 路径
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,11 +26,11 @@
 #include <bpf/libbpf.h>
 
 #define ETH_ALEN  6
-/* All pins live flat under /sys/fs/bpf/, prefixed with xdp_ipip_ */
+/* 所有 pin 位于 /sys/fs/bpf/, 以 xdp_ipip_ 为前缀 */
 #define PIN_PFX   "/sys/fs/bpf/xdp_ipip_"
 #define PIN_BASE  "/sys/fs/bpf"
 
-/* ── structs matching common/xdp_maps.h ─────────────────────────────────── */
+/* ── 结构体, 对应 common/xdp_maps.h ─────────────────────────────────── */
 
 struct route_entry {
 	__u32         host_ip;
@@ -51,7 +51,7 @@ struct host_info {
 	__u16         _pad;
 };
 
-/* ── helpers ─────────────────────────────────────────────────────────────── */
+/* ── 辅助函数 ─────────────────────────────────────────────────────────────── */
 
 static int parse_mac(const char *str, unsigned char *mac)
 {
@@ -90,7 +90,7 @@ static int get_ifindex(const char *s)
 
 static int cmd_load(const char *obj_file)
 {
-	/* Idempotent: skip if already fully pinned */
+	/* 幂等: 如果已经完全 pin 过则跳过 */
 	if (access(PIN_PFX "routing_map", F_OK) == 0 &&
 	    access(PIN_PFX "eth_ingress_prog", F_OK) == 0) {
 		printf("already pinned, skipping load\n");
@@ -104,7 +104,7 @@ static int cmd_load(const char *obj_file)
 		return 1;
 	}
 
-	/* Force XDP type for all programs (section names are non-standard) */
+	/* 为所有程序强制设置 XDP 类型 (section 名称非标准) */
 	struct bpf_program *prog;
 	bpf_object__for_each_program(prog, obj)
 		bpf_program__set_type(prog, BPF_PROG_TYPE_XDP);
@@ -115,7 +115,7 @@ static int cmd_load(const char *obj_file)
 		return 1;
 	}
 
-	/* Pin each map individually to flat path PIN_PFX<map_name> */
+	/* 单独 pin 每个 map 到扁平路径 PIN_PFX<map_name> */
 	static const char *map_names[] = {
 		"routing_map", "delivery_map", "host_config", "tx_ports",
 	};
@@ -129,7 +129,7 @@ static int cmd_load(const char *obj_file)
 		}
 		char pin_path[256];
 		snprintf(pin_path, sizeof(pin_path), PIN_PFX "%s", map_names[i]);
-		/* Remove stale pin if present from a previous failed run */
+		/* 如果之前运行失败存在 stale pin, 先删除 */
 		unlink(pin_path);
 		if (bpf_map__pin(map, pin_path)) {
 			fprintf(stderr, "bpf_map__pin(%s): %s\n",
@@ -140,7 +140,7 @@ static int cmd_load(const char *obj_file)
 		printf("pinned map: %s\n", pin_path);
 	}
 
-	/* Pin programs to flat path PIN_PFX<prog_pin_name> */
+	/* Pin 程序到扁平路径 PIN_PFX<prog_pin_name> */
 	static const struct { const char *func; const char *pin; } progs[] = {
 		{ "xdp_pod_egress_func",  "pod_egress_prog"  },
 		{ "xdp_eth_ingress_func", "eth_ingress_prog" },
@@ -450,11 +450,11 @@ static void print_usage(const char *prog)
 		"Usage: %s <command> [args...]\n"
 		"\n"
 		"Commands:\n"
-		"  load    <obj_file>                          – load BPF obj, pin maps+progs\n"
+		"  load    <obj_file>                          – 加载 BPF 对象, pin maps+progs\n"
 		"  route   add <pod_ip> <host_ip> <host_mac>\n"
 		"  deliver add <pod_ip> <ifname|ifindex> <pod_mac>\n"
 		"  host    set <host_ip> <eth_ifname|ifindex> <eth_mac>\n"
-		"  host    get                                 – print host_ip eth_mac\n"
+		"  host    get                                 – 打印 host_ip eth_mac\n"
 		"  txport  add <ifname|ifindex>\n"
 		"  dump\n",
 		prog);
