@@ -100,7 +100,7 @@ static __always_inline int fix_inner_checksums(void *data, void *data_end)
 		if (ip_proto == IPPROTO_TCP) {
 			struct tcphdr *tcph;
 			if (parse_tcphdr(&nh, data_end, &tcph) < 0)
-				return 0;
+				return -1;
 			if (update_ipv4_l4_checksum(iph, &tcph->check,
 						    l4hdr, l4_len, data_end) < 0)
 				return -1;
